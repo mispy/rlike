@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 
 require 'libtcod'
+require 'sdl'
 
 #actual size of the window
 SCREEN_WIDTH = 80
@@ -79,6 +80,14 @@ class Menu
 end
 
 trap('SIGINT') { exit! }
+
+SDL::TTF.init
+TCOD::System.register_sdl_renderer do |renderer|
+  dst = SDL::Screen.get
+  font = SDL::TTF.open('FreeSerif.ttf', 32, 0)
+  surface = font.render_solid_utf8("hullo", 255, 255, 255)
+  SDL::Surface.blit(surface, 0, 0, 0, 0, dst, 0, 0)
+end
 
 menu = Menu.new
 until Console.window_closed?
