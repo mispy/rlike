@@ -4,8 +4,8 @@ require 'libtcod'
 require 'sdl'
 
 #actual size of the window
-SCREEN_WIDTH = 80
-SCREEN_HEIGHT = 50
+SCREEN_WIDTH = 160
+SCREEN_HEIGHT = 100
  
 LIMIT_FPS = 20  #20 frames-per-second maximum
 
@@ -34,6 +34,125 @@ def handle_keys
 
   false
 end
+
+class Cell
+  attr_reader :x, :y
+  attr_accessor :contents
+
+  def initialize(x, y)
+    @x = x
+    @y = y
+    @contents = []
+  end
+
+  def passable?
+    @contents[0].passable
+  end
+end
+
+class Terrain
+  attr_reader :char, :color, :passable
+  def initialize(char, color, passable)
+    @char = char
+    @color = color
+    @passable = passable
+  end
+end
+
+class Map
+  attr_reader :width, :height, :cells
+  def initialize(w, h)
+    @width = w
+    @height = h
+
+    floor = Terrain.new(' ', TCOD::Color.rgb(77,60,41), true)
+    wall = Terrain.new(' ', TCOD::Color::WHITE, false)
+
+    @cells = []
+    0.upto(w-1) do |x|
+      @cells.push([])
+      0.upto(h-1) do |y|
+        cell = Cell.new(x,y)
+        if rand > 0.8
+          cell.contents.push(wall)
+        else
+          cell.contents.push(floor)
+        end
+        @cells[x].push(cell)
+      end
+    end
+  end
+
+  def each_cell(&b)
+    @cells.each do |row|
+      row.each do |cell|
+        yield cell
+      end
+    end
+  end
+end
+
+class Thing
+  attr_reader :char, :cell, :color
+  attr_accessor :fov_map
+
+  def initialize
+    @char = '@'
+    @color = TCOD::Color::WHITE
+  end
+
+  def move(x, y)
+    return unless $map.cells[x][y].passable?
+    @cell.contents.delete(self) if @cell
+    @cell = $map.cells[x][y]
+    @cell.contents.push(self)
+  end
+end
+
+class Game
+  def initialize
+    $map = Map.new(SCREEN_WIDTH, SCREEN_HEIGHT)
+    $player = Thing.new
+    $player.move(5,5)
+    $player.fov_map = TCOD.map_new($map.width, $map.height)
+    $map.each_cell do |cell|
+      TCOD.map_set_properties($player.fov_map, cell.x, cell.y, cell.passable?, cell.passable?)
+    end
+  end
+end
+
+class MainGameUI
+  def render(console)
+    con = TCOD::Console.new($map.width, $map.height) # Temporary console
+    TCOD.map_compute_fov($player.fov_map, $player.cell.x, $player.cell.y, 10, true, 0)
+
+    $map.cells.each do |row|
+      row.each do |cell|
+        if TCOD.map_is_in_fov($player.fov_map, cell.x, cell.y)
+          floor = cell.contents[0]
+          obj = cell.contents[-1]
+          con.put_char_ex(cell.x, cell.y, obj.char, obj.color, floor.color)
+        else
+          con.put_char(cell.x, cell.y, ' ', TCOD::BKGND_NONE)
+        end
+      end
+    end
+
+    Console.blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0)
+  end
+
+  def on_keypress(key)
+    if Console.key_pressed?(TCOD::KEY_UP)
+      $player.move($player.cell.x, $player.cell.y-1)
+    elsif Console.key_pressed?(TCOD::KEY_DOWN)
+      $player.move($player.cell.x, $player.cell.y+1)
+    elsif Console.key_pressed?(TCOD::KEY_LEFT)
+      $player.move($player.cell.x-1, $player.cell.y)
+    elsif Console.key_pressed?(TCOD::KEY_RIGHT)
+      $player.move($player.cell.x+1, $player.cell.y)
+    end
+  end
+end
  
 #############################################
 # Initialization & Main Loop
@@ -43,8 +162,6 @@ Console.set_custom_font('arial12x12.png', TCOD::FONT_TYPE_GREYSCALE | TCOD::FONT
 Console.init_root(SCREEN_WIDTH, SCREEN_HEIGHT, 'ruby/TCOD tutorial', false, TCOD::RENDERER_SDL)
 TCOD.sys_set_fps(LIMIT_FPS)
  
-$playerx = SCREEN_WIDTH/2
-$playery = SCREEN_HEIGHT/2
 
 class Menu
   def initialize
@@ -81,22 +198,23 @@ end
 
 trap('SIGINT') { exit! }
 
-SDL::TTF.init
-TCOD::System.register_sdl_renderer do |renderer|
-  dst = SDL::Screen.get
-  font = SDL::TTF.open('FreeSerif.ttf', 32, 0)
-  surface = font.render_solid_utf8("hullo", 255, 255, 255)
-  SDL::Surface.blit(surface, 0, 0, 0, 0, dst, 0, 0)
-end
+#SDL::TTF.init
+#TCOD::System.register_sdl_renderer do |renderer|
+#  dst = SDL::Screen.get
+#  font = SDL::TTF.open('FreeSerif.ttf', 32, 0)
+#  surface = font.render_solid_utf8("hullo", 255, 255, 255)
+#  SDL::Surface.blit(surface, 0, 0, 0, 0, dst, 0, 0)
+#end
 
-menu = Menu.new
+$game = Game.new
+$ui = MainGameUI.new
 until Console.window_closed?
-  menu.print(Console)
+  $ui.render(Console)
   Console.flush
 
   key = Console.check_for_keypress
   if key.vk != TCOD::KEY_NONE
     exit! if key.vk == TCOD::KEY_ESCAPE
-    menu.on_keypress(key)
+    $ui.on_keypress(key)
   end
 end
