@@ -48,16 +48,17 @@ end
 
 class Cell
   attr_reader :x, :y
-  attr_accessor :contents
+  attr_accessor :contents, :terrain
 
-  def initialize(x, y)
+  def initialize(x, y, terrain)
     @x = x
     @y = y
-    @contents = []
+    @terrain = terrain # Basic terrain: wall or floor etc
+    @contents = [] # Containing objects
   end
 
   def passable?
-    @contents[0].passable
+    @terrain.passable
   end
 end
 
@@ -83,12 +84,8 @@ class Map
     0.upto(w-1) do |x|
       @cells.push([])
       0.upto(h-1) do |y|
-        cell = Cell.new(x,y)
-        if rand > 0.8
-          cell.contents.push(wall)
-        else
-          cell.contents.push(floor)
-        end
+        terrain = (rand > 0.8 ? wall : floor)
+        cell = Cell.new(x, y, terrain)
         @cells[x].push(cell)
       end
     end
@@ -144,14 +141,14 @@ class MainGameUI
       row.each do |cell|
         visible = TCOD.map_is_in_fov($player.fov_map, cell.x, cell.y)
         remembered = $player.memory_map[cell.x][cell.y]
-        floor = cell.contents[0]
-        obj = cell.contents[-1]
+        terrain = cell.terrain
+        obj = cell.contents[0] || terrain
 
         if visible
           $player.memory_map[cell.x][cell.y] = true
-          con.put_char_ex(cell.x, cell.y, obj.char, obj.color, floor.color)
+          con.put_char_ex(cell.x, cell.y, obj.char, obj.color, terrain.color)
         elsif remembered
-          con.put_char_ex(cell.x, cell.y, obj.char, obj.color * 0.5, floor.color * 0.5)
+          con.put_char_ex(cell.x, cell.y, obj.char, obj.color * 0.5, terrain.color * 0.5)
         else
           con.put_char(cell.x, cell.y, ' ', TCOD::BKGND_NONE)
         end
