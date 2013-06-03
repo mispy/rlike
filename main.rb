@@ -35,6 +35,17 @@ def handle_keys
   false
 end
 
+class Bitfield < Array
+  def initialize(w, h)
+    0.upto(w-1) do |x|
+      self.push([])
+      0.upto(h-1) do |y|
+        self[x].push(false)
+      end
+    end
+  end
+end
+
 class Cell
   attr_reader :x, :y
   attr_accessor :contents
@@ -92,13 +103,15 @@ class Map
   end
 end
 
-class Thing
+class Player
   attr_reader :char, :cell, :color
-  attr_accessor :fov_map
+  attr_accessor :fov_map, :memory_map
 
   def initialize
     @char = '@'
     @color = TCOD::Color::WHITE
+    @fov_map = nil # TCOD field of view map
+    @memory_map = nil # Exploration state map
   end
 
   def move(x, y)
@@ -112,9 +125,10 @@ end
 class Game
   def initialize
     $map = Map.new(SCREEN_WIDTH, SCREEN_HEIGHT)
-    $player = Thing.new
+    $player = Player.new
     $player.move(5,5)
     $player.fov_map = TCOD.map_new($map.width, $map.height)
+    $player.memory_map = Bitfield.new($map.width, $map.height)
     $map.each_cell do |cell|
       TCOD.map_set_properties($player.fov_map, cell.x, cell.y, cell.passable?, cell.passable?)
     end
@@ -128,10 +142,16 @@ class MainGameUI
 
     $map.cells.each do |row|
       row.each do |cell|
-        if TCOD.map_is_in_fov($player.fov_map, cell.x, cell.y)
-          floor = cell.contents[0]
-          obj = cell.contents[-1]
+        visible = TCOD.map_is_in_fov($player.fov_map, cell.x, cell.y)
+        remembered = $player.memory_map[cell.x][cell.y]
+        floor = cell.contents[0]
+        obj = cell.contents[-1]
+
+        if visible
+          $player.memory_map[cell.x][cell.y] = true
           con.put_char_ex(cell.x, cell.y, obj.char, obj.color, floor.color)
+        elsif remembered
+          con.put_char_ex(cell.x, cell.y, obj.char, obj.color * 0.5, floor.color * 0.5)
         else
           con.put_char(cell.x, cell.y, ' ', TCOD::BKGND_NONE)
         end
