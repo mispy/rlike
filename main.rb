@@ -75,11 +75,27 @@ class Cell
   end
 
   def passable?
-    @terrain.passable
+    @terrain.passable && !@contents.find { |thing| !thing.passable }
   end
 
   def put(obj)
-    obj.move(@x,@y)
+    obj.cell.contents.delete(obj) if obj.cell
+    obj.cell = self
+    @contents.push(obj)
+  end
+
+  # List all immediately adjacent cells
+  def adjacent
+    a = []
+    (@x-1 .. @x+1).each do |x|
+      (@y-1 .. @y+1).each do |y|
+        cell = $map[x][y]
+        if cell && cell != self
+          a.push cell
+        end
+      end
+    end
+    a
   end
 end
 
@@ -212,11 +228,29 @@ end
 $mapgen = Mapgen.new
 
 class Map
-  attr_reader :width, :height, :cells
+  attr_reader :width, :height, :cells, :tcod_map
   def initialize(w, h)
     @width = w
     @height = h
     @cellmap = []
+
+    @tcod_map = nil
+  end
+
+  def precompute
+    @tcod_map = TCOD.map_new($map.width, $map.height)
+    cells.each do |cell|
+      TCOD.map_set_properties(@tcod_map, cell.x, cell.y, cell.passable?, cell.passable?)
+    end
+  end
+
+  def path_between(ox, oy, dx, dy)
+    path = TCOD.path_new_using_map(@tcod_map, 1.41)
+    if TCOD.path_compute(path, ox, oy, dx, dy)
+      path
+    else
+      nil
+    end
   end
 
   def [](x)
@@ -248,76 +282,82 @@ class Map
   def some_cell
     @cellmap[rand(@width)][rand(@height)]
   end
+
+  def things
+    cells.map { |cell| cell.contents }.flatten
+  end
 end
 
-class Player
-  attr_reader :char, :cell, :color
-  attr_accessor :fov_map, :memory_map
+class Thing
+  attr_accessor :char, :color, :cell, :passable
 
   def initialize
-    @char = '@'
-    @color = TCOD::Color::WHITE
-    @fov_map = nil # TCOD field of view map
-    @memory_map = nil # Exploration state map
+    @char = '?'
+    @color = TCOD::Color::PINK
+    @passable = true
   end
+
+  def x; @cell.x; end
+  def y; @cell.y; end
 
   def move(x, y)
-    return unless $map[x][y].passable?
-    @cell.contents.delete(self) if @cell
-    @cell = $map[x][y]
-    @cell.contents.push(self)
+    target = $map[x][y]
+    return unless target.passable?
+    target.put(self)
   end
 
-  def save
-    {
-      x: @cell.x,
-      y: @cell.y,
-      char: @char,
-      color: @color.save,
-      memory_map: @memory_map.save
-    }
-  end
-
-  def self.load(data)
-    player = Player.new
-    player.instance_eval {
-      @char = data[:char]
-      @color = TCOD::Color.load(data[:color])
-      @memory_map = Bitfield.load(data[:memory_map])
-      move(data[:x], data[:y])
-    }
-    player
-  end
+  def take_turn; end
 end
 
-class Game
+class Pet < Thing
+   def initialize
+     super
+     @char = 'm'
+     @color = TCOD::Color::DESATURATED_CHARTREUSE
+     @passable = false
+   end
+
+   def take_turn
+     unless @path
+       @path = $map.path_between(@cell.x, @cell.y, $player.x, $player.y)
+     end
+
+     return unless @path
+
+     px = FFI::MemoryPointer.new(:int)
+     py = FFI::MemoryPointer.new(:int)
+     if TCOD.path_walk(@path, px, py, true)
+       move(px.read_int, py.read_int)
+     else
+       @path = nil
+       take_turn
+     end
+   end
+end
+
+class Player < Thing
+  attr_accessor :memory_map
+  attr_reader :pets
+
   def initialize
-    $player = Player.new
-    change_map($mapgen.classic(SCREEN_WIDTH, SCREEN_HEIGHT))
-    $map.upstair.put($player)
+    super
+    @char = '@'
+    @color = TCOD::Color::WHITE
+    @memory_map = nil # Exploration state map
+    @pets = []
+    @passable = false
   end
-  
-  def change_map(new_map)
-    $map = new_map
 
-    $player.fov_map = TCOD.map_new($map.width, $map.height)
-    $map.cells.each do |cell|
-      TCOD.map_set_properties($player.fov_map, cell.x, cell.y, cell.passable?, cell.passable?)
-    end
-
-    $player.memory_map = Bitfield.new($map.width, $map.height)
+  def summon_pets
+    @cell.adjacent.find_all { |x| x.passable? }.sample.put(@pets[0])
   end
 end
 
-
-class Obj
-  attr_accessor :char, :color
-end
-
-class Staircase < Obj
+class Staircase < Thing
   attr_reader :dir
 
   def initialize(dir)
+    super()
     @dir = dir
     @char = @dir == :up ? '<' : '>'
     @color = TCOD::Color::WHITE
@@ -328,16 +368,37 @@ class Staircase < Obj
     opposite = (@dir == :down ? :up : :down)
     cell = $map.cells.find { |c| c.contents.find { |obj| obj.is_a?(Staircase) && obj.dir == opposite } }
     $player.move(cell.x,cell.y)
+    $player.summon_pets
   end
 end
+
+
+class Game
+  def initialize
+    $player = Player.new
+    $player.pets.push(Pet.new)
+    change_map($mapgen.classic(SCREEN_WIDTH, SCREEN_HEIGHT))
+    $map.upstair.put($player)
+    $player.summon_pets
+  end
+  
+  def change_map(new_map)
+    $map = new_map
+
+    $map.precompute
+
+    $player.memory_map = Bitfield.new($map.width, $map.height)
+  end
+end
+
 
 class MainGameUI
   def render(console)
     con = TCOD::Console.new($map.width, $map.height) # Temporary console
-    TCOD.map_compute_fov($player.fov_map, $player.cell.x, $player.cell.y, 10, true, 0)
+    TCOD.map_compute_fov($map.tcod_map, $player.cell.x, $player.cell.y, 10, true, 0)
 
     $map.cells.each do |cell|
-      visible = TCOD.map_is_in_fov($player.fov_map, cell.x, cell.y)
+      visible = true#TCOD.map_is_in_fov($player.fov_map, cell.x, cell.y)
       remembered = $player.memory_map[cell.x][cell.y]
       terrain = cell.terrain
       obj = cell.contents[-1] || terrain
@@ -378,6 +439,10 @@ class MainGameUI
       $player.move($player.cell.x-1, $player.cell.y)
     elsif Console.key_pressed?(TCOD::KEY_RIGHT)
       $player.move($player.cell.x+1, $player.cell.y)
+    end
+
+    $map.things.each do |thing|
+      thing.take_turn
     end
   end
 end
