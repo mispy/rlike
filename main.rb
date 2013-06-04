@@ -77,6 +77,10 @@ class Cell
   def passable?
     @terrain.passable
   end
+
+  def put(obj)
+    obj.move(@x,@y)
+  end
 end
 
 class TerrainType
@@ -94,6 +98,119 @@ Terrain = {
   wall: TerrainType.new(:wall, ' ', TCOD::Color::WHITE, false)
 }
 
+class Rect
+  attr_accessor :x1, :y1, :x2, :y2
+  def initialize (x, y, w, h)
+    @x1 = x
+    @y1 = y
+    @x2 = x + w
+    @y2 = y + h
+  end
+
+  def center
+    center_x = (@x1 + @x2) / 2
+    center_y = (@y1 + @y2) / 2
+    [center_x, center_y]
+  end
+
+  def intersect (other)
+    return (@x1 <= other.x2 and @x2 >= other.x1 and
+      @y1 <= other.y2 and @y2 >= other.y1)
+  end
+end
+
+class Range
+  def sample
+    min + rand(max-min)
+  end
+end
+
+class Mapgen
+  def solid_base(width, height)
+    map = Map.new(width, height)
+    map.instance_eval do
+      0.upto(width-1) do |x|
+        @cellmap.push([])
+        0.upto(height-1) do |y|
+          @cellmap[x].push(Cell.new(x, y, Terrain[:wall]))
+        end
+      end
+    end
+    map
+  end
+
+  def paint_room(room)
+    (room.x1 ... room.x2).each do |x|
+      (room.y1 ... room.y2).each do |y|
+        @map[x][y].terrain = Terrain[:floor]
+      end
+    end
+  end
+
+  def paint_htunnel(x1, x2, y)
+    ([x1,x2].min .. [x1,x2].max).each do |x|
+      @map[x][y].terrain = Terrain[:floor]
+    end
+  end
+
+  def paint_vtunnel(y1, y2, x)
+    ([y1,y2].min .. [y1,y2].max).each do |y|
+      @map[x][y].terrain = Terrain[:floor]
+    end
+  end
+
+  def paint_stairs
+    @map.some_passable_cell.contents.push(Staircase.new(:down))
+    @map.some_passable_cell.contents.push(Staircase.new(:up))
+  end
+
+  def classic(width, height, opts={})
+    opts = {
+      max_rooms: 10,
+      room_min_size: 6,
+      room_max_size: 10
+    }.merge(opts)
+
+    @map = solid_base(width, height)
+
+    rooms = []
+    
+    0.upto(opts[:max_rooms]) do
+      w = (opts[:room_min_size] .. opts[:room_max_size]).sample
+      h = (opts[:room_min_size] .. opts[:room_max_size]).sample
+      x = (0 .. @map.width - w - 1).sample
+      y = (0 .. @map.height - h - 1).sample
+
+      new_room = Rect.new(x, y, w, h)
+      next if rooms.find { |other| new_room.intersect(other) }
+
+      paint_room(new_room)
+      new_x, new_y = new_room.center
+
+      # Connect to any previous room
+      unless rooms.empty?
+        prev_x, prev_y = rooms[-1].center
+
+        if rand < 0.5
+          paint_htunnel(prev_x, new_x, prev_y)
+          paint_vtunnel(prev_y, new_y, new_x)
+        else
+          paint_vtunnel(prev_y, new_y, prev_x)
+          paint_htunnel(prev_x, new_x, new_y)
+        end
+      end
+
+      rooms.push(new_room)
+      prev_x, prev_y = new_x, new_y
+    end
+
+    paint_stairs
+    @map
+  end
+end
+
+$mapgen = Mapgen.new
+
 class Map
   attr_reader :width, :height, :cells
   def initialize(w, h)
@@ -106,26 +223,6 @@ class Map
     @cellmap[x]
   end
 
-  def self.generate(w,h)
-    map = Map.new(w,h)
-    map.instance_eval {
-      0.upto(w-1) do |x|
-        @cellmap.push([])
-        0.upto(h-1) do |y|
-          terrain = Terrain[(rand > 0.9 ? :wall : :floor)]
-          cell = Cell.new(x, y, terrain)
-          @cellmap[x].push(cell)
-        end
-      end
-
-      passable_cells = cells.find_all { |cell| cell.passable? }
-      passable_cells.sample.contents.push(Staircase.new(:down))
-      passable_cells.sample.contents.push(Staircase.new(:up))
-    }
-
-    map
-  end
-
   def cells(&b)
     Enumerator.new do |y|
       @cellmap.each do |row|
@@ -136,7 +233,19 @@ class Map
     end
   end
 
-  def random_passable_cell
+  def upstair
+    cells.find { |cell| cell.contents.find { |c| c.is_a?(Staircase) && c.dir == :up } }
+  end
+
+  def downstair
+    cells.find { |cell| cell.contents.find { |c| c.is_a?(Staircase) && c.dir == :down } }
+  end
+
+  def some_passable_cell
+    cells.find_all { |cell| cell.passable? }.sample
+  end
+
+  def some_cell
     @cellmap[rand(@width)][rand(@height)]
   end
 end
@@ -153,7 +262,7 @@ class Player
   end
 
   def move(x, y)
-    #return unless $map[x][y].passable?
+    return unless $map[x][y].passable?
     @cell.contents.delete(self) if @cell
     @cell = $map[x][y]
     @cell.contents.push(self)
@@ -183,14 +292,20 @@ end
 
 class Game
   def initialize
-    $map = Map.generate(SCREEN_WIDTH, SCREEN_HEIGHT)
     $player = Player.new
-    $player.move(5,5)
+    change_map($mapgen.classic(SCREEN_WIDTH, SCREEN_HEIGHT))
+    $map.upstair.put($player)
+  end
+  
+  def change_map(new_map)
+    $map = new_map
+
     $player.fov_map = TCOD.map_new($map.width, $map.height)
-    $player.memory_map = Bitfield.new($map.width, $map.height)
     $map.cells.each do |cell|
       TCOD.map_set_properties($player.fov_map, cell.x, cell.y, cell.passable?, cell.passable?)
     end
+
+    $player.memory_map = Bitfield.new($map.width, $map.height)
   end
 end
 
@@ -209,7 +324,7 @@ class Staircase < Obj
   end
 
   def activate
-    $map = Map.generate(SCREEN_WIDTH, SCREEN_HEIGHT)
+    $game.change_map($mapgen.classic(SCREEN_WIDTH, SCREEN_HEIGHT))
     opposite = (@dir == :down ? :up : :down)
     cell = $map.cells.find { |c| c.contents.find { |obj| obj.is_a?(Staircase) && obj.dir == opposite } }
     $player.move(cell.x,cell.y)
@@ -222,7 +337,7 @@ class MainGameUI
     TCOD.map_compute_fov($player.fov_map, $player.cell.x, $player.cell.y, 10, true, 0)
 
     $map.cells.each do |cell|
-      visible = true#TCOD.map_is_in_fov($player.fov_map, cell.x, cell.y)
+      visible = TCOD.map_is_in_fov($player.fov_map, cell.x, cell.y)
       remembered = $player.memory_map[cell.x][cell.y]
       terrain = cell.terrain
       obj = cell.contents[-1] || terrain
