@@ -3,10 +3,11 @@
 require 'libtcod'
 require 'sdl'
 require 'json'
+require 'pry'
 
 #actual size of the window
-SCREEN_WIDTH = 160
-SCREEN_HEIGHT = 100
+SCREEN_WIDTH = 80
+SCREEN_HEIGHT = 50
  
 LIMIT_FPS = 20  #20 frames-per-second maximum
 
@@ -69,6 +70,10 @@ class Cell
     @contents = [] # Containing objects
   end
 
+  def find(objtype)
+    @contents.find { |x| x.is_a? objtype }
+  end
+
   def passable?
     @terrain.passable
   end
@@ -94,24 +99,45 @@ class Map
   def initialize(w, h)
     @width = w
     @height = h
+    @cellmap = []
+  end
 
-    @cells = []
-    0.upto(w-1) do |x|
-      @cells.push([])
-      0.upto(h-1) do |y|
-        terrain = Terrain[(rand > 0.8 ? :wall : :floor)]
-        cell = Cell.new(x, y, terrain)
-        @cells[x].push(cell)
+  def [](x)
+    @cellmap[x]
+  end
+
+  def self.generate(w,h)
+    map = Map.new(w,h)
+    map.instance_eval {
+      0.upto(w-1) do |x|
+        @cellmap.push([])
+        0.upto(h-1) do |y|
+          terrain = Terrain[(rand > 0.9 ? :wall : :floor)]
+          cell = Cell.new(x, y, terrain)
+          @cellmap[x].push(cell)
+        end
+      end
+
+      passable_cells = cells.find_all { |cell| cell.passable? }
+      passable_cells.sample.contents.push(Staircase.new(:down))
+      passable_cells.sample.contents.push(Staircase.new(:up))
+    }
+
+    map
+  end
+
+  def cells(&b)
+    Enumerator.new do |y|
+      @cellmap.each do |row|
+        row.each do |cell|
+          y << cell
+        end
       end
     end
   end
 
-  def each_cell(&b)
-    @cells.each do |row|
-      row.each do |cell|
-        yield cell
-      end
-    end
+  def random_passable_cell
+    @cellmap[rand(@width)][rand(@height)]
   end
 end
 
@@ -127,9 +153,9 @@ class Player
   end
 
   def move(x, y)
-    #return unless $map.cells[x][y].passable?
+    #return unless $map[x][y].passable?
     @cell.contents.delete(self) if @cell
-    @cell = $map.cells[x][y]
+    @cell = $map[x][y]
     @cell.contents.push(self)
   end
 
@@ -157,46 +183,36 @@ end
 
 class Game
   def initialize
-    $map = Map.new(SCREEN_WIDTH, SCREEN_HEIGHT)
+    $map = Map.generate(SCREEN_WIDTH, SCREEN_HEIGHT)
     $player = Player.new
     $player.move(5,5)
     $player.fov_map = TCOD.map_new($map.width, $map.height)
     $player.memory_map = Bitfield.new($map.width, $map.height)
-    $map.each_cell do |cell|
+    $map.cells.each do |cell|
       TCOD.map_set_properties($player.fov_map, cell.x, cell.y, cell.passable?, cell.passable?)
     end
   end
+end
 
-  def save(path)
-    mapdata = { 
-      width: $map.width,
-      height: $map.height,
-      cells: [],
-      player: $player.save
-    }
-    0.upto($map.width-1) do |x|
-      mapdata[:cells].push([])
-      0.upto($map.height-1) do |y|
-        mapdata[:cells][x].push(
-          { terrain: $map.cells[x][y].terrain.label }
-        )
-      end
-    end
-    File.write(path, JSON.dump(mapdata))
+
+class Obj
+  attr_accessor :char, :color
+end
+
+class Staircase < Obj
+  attr_reader :dir
+
+  def initialize(dir)
+    @dir = dir
+    @char = @dir == :up ? '<' : '>'
+    @color = TCOD::Color::WHITE
   end
 
-  def load(path)
-    mapdata = JSON.parse(File.read(path), symbolize_names: true)
-    $map = Map.new(mapdata[:width], mapdata[:height])
-    $map.each_cell do |cell|
-      celldata = mapdata[:cells][cell.x][cell.y]
-      cell.terrain = Terrain[celldata[:terrain].to_sym]
-    end
-    $player = Player.load(mapdata[:player])
-    $player.fov_map = TCOD.map_new($map.width, $map.height)
-    $map.each_cell do |cell|
-      TCOD.map_set_properties($player.fov_map, cell.x, cell.y, cell.passable?, cell.passable?)
-    end
+  def activate
+    $map = Map.generate(SCREEN_WIDTH, SCREEN_HEIGHT)
+    opposite = (@dir == :down ? :up : :down)
+    cell = $map.cells.find { |c| c.contents.find { |obj| obj.is_a?(Staircase) && obj.dir == opposite } }
+    $player.move(cell.x,cell.y)
   end
 end
 
@@ -205,21 +221,19 @@ class MainGameUI
     con = TCOD::Console.new($map.width, $map.height) # Temporary console
     TCOD.map_compute_fov($player.fov_map, $player.cell.x, $player.cell.y, 10, true, 0)
 
-    $map.cells.each do |row|
-      row.each do |cell|
-        visible = TCOD.map_is_in_fov($player.fov_map, cell.x, cell.y)
-        remembered = $player.memory_map[cell.x][cell.y]
-        terrain = cell.terrain
-        obj = cell.contents[0] || terrain
+    $map.cells.each do |cell|
+      visible = true#TCOD.map_is_in_fov($player.fov_map, cell.x, cell.y)
+      remembered = $player.memory_map[cell.x][cell.y]
+      terrain = cell.terrain
+      obj = cell.contents[-1] || terrain
 
-        if visible
-          $player.memory_map[cell.x][cell.y] = true
-          con.put_char_ex(cell.x, cell.y, obj.char, obj.color, terrain.color)
-        elsif remembered
-          con.put_char_ex(cell.x, cell.y, obj.char, obj.color * 0.5, terrain.color * 0.5)
-        else
-          con.put_char(cell.x, cell.y, ' ', TCOD::BKGND_NONE)
-        end
+      if visible
+        $player.memory_map[cell.x][cell.y] = true
+        con.put_char_ex(cell.x, cell.y, obj.char, obj.color, terrain.color)
+      elsif remembered
+        con.put_char_ex(cell.x, cell.y, obj.char, obj.color * 0.5, terrain.color * 0.5)
+      else
+        con.put_char(cell.x, cell.y, ' ', TCOD::BKGND_NONE)
       end
     end
 
@@ -227,10 +241,18 @@ class MainGameUI
   end
 
   def on_keypress(key)
-    if key.c == 's'
-      $game.save("save/game.json")
-    elsif key.c == 'l'
-      $game.load("save/game.json")
+    case key.c
+    when 's' then $game.save("save/game.json")
+    when 'l' then $game.load("save/game.json")
+    when '`' then binding.pry
+    when '>'
+      $player.cell.contents.each do |obj|
+        obj.activate if obj.is_a?(Staircase) && obj.dir == :down
+      end
+    when '<'
+      $player.cell.contents.each do |obj|
+        obj.activate if obj.is_a?(Staircase) && obj.dir == :up
+      end
     end
 
     if Console.key_pressed?(TCOD::KEY_UP)
