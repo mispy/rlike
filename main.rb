@@ -2,6 +2,7 @@
 
 require 'libtcod'
 require 'sdl'
+require 'json'
 
 #actual size of the window
 SCREEN_WIDTH = 160
@@ -10,39 +11,50 @@ SCREEN_HEIGHT = 100
 LIMIT_FPS = 20  #20 frames-per-second maximum
 
 Console = TCOD::Console.root
- 
-def handle_keys
-  key = Console.wait_for_keypress(true)
 
-  if key.vk == TCOD::KEY_ENTER && key.lalt
-    #Alt+Enter: toggle fullscreen
-    Console.set_fullscreen(!Console.is_fullscreen?)
-  elsif key.vk == TCOD::KEY_ESCAPE
-    return true  #exit game
+module TCOD
+  class Color
+    def save
+      [self[:r], self[:g], self[:b]]
+    end
+
+    def self.load(data)
+      Color.rgb(*data)
+    end
   end
-
-  #movement keys
-  if Console.key_pressed?(TCOD::KEY_UP)
-      $playery -= 1
-  elsif Console.key_pressed?(TCOD::KEY_DOWN)
-      $playery += 1
-  elsif Console.key_pressed?(TCOD::KEY_LEFT)
-      $playerx -= 1
-  elsif Console.key_pressed?(TCOD::KEY_RIGHT)
-      $playerx += 1
-  end
-
-  false
 end
-
-class Bitfield < Array
+ 
+class Bitfield
+  # Just an array of booleans for now, but
+  # here so it can be optimized later
   def initialize(w, h)
+    @arr = []
     0.upto(w-1) do |x|
-      self.push([])
+      @arr.push([])
       0.upto(h-1) do |y|
-        self[x].push(false)
+        @arr[x].push(false)
       end
     end
+  end
+
+  def [](x)
+    @arr[x]
+  end
+
+  def []=(x, y)
+    @arr[x] = y
+  end
+
+  def save
+    @arr.to_a
+  end
+
+  def self.load(data)
+    field = Bitfield.new(data.length, data[0].length)
+    field.instance_eval {
+      @arr = data
+    }
+    field
   end
 end
 
@@ -62,14 +74,20 @@ class Cell
   end
 end
 
-class Terrain
-  attr_reader :char, :color, :passable
-  def initialize(char, color, passable)
+class TerrainType
+  attr_reader :label, :char, :color, :passable
+  def initialize(label, char, color, passable)
+    @label = label
     @char = char
     @color = color
     @passable = passable
   end
 end
+
+Terrain = {
+  floor: TerrainType.new(:floor, ' ', TCOD::Color.rgb(77,60,41), true),
+  wall: TerrainType.new(:wall, ' ', TCOD::Color::WHITE, false)
+}
 
 class Map
   attr_reader :width, :height, :cells
@@ -77,14 +95,11 @@ class Map
     @width = w
     @height = h
 
-    floor = Terrain.new(' ', TCOD::Color.rgb(77,60,41), true)
-    wall = Terrain.new(' ', TCOD::Color::WHITE, false)
-
     @cells = []
     0.upto(w-1) do |x|
       @cells.push([])
       0.upto(h-1) do |y|
-        terrain = (rand > 0.8 ? wall : floor)
+        terrain = Terrain[(rand > 0.8 ? :wall : :floor)]
         cell = Cell.new(x, y, terrain)
         @cells[x].push(cell)
       end
@@ -112,10 +127,31 @@ class Player
   end
 
   def move(x, y)
-    return unless $map.cells[x][y].passable?
+    #return unless $map.cells[x][y].passable?
     @cell.contents.delete(self) if @cell
     @cell = $map.cells[x][y]
     @cell.contents.push(self)
+  end
+
+  def save
+    {
+      x: @cell.x,
+      y: @cell.y,
+      char: @char,
+      color: @color.save,
+      memory_map: @memory_map.save
+    }
+  end
+
+  def self.load(data)
+    player = Player.new
+    player.instance_eval {
+      @char = data[:char]
+      @color = TCOD::Color.load(data[:color])
+      @memory_map = Bitfield.load(data[:memory_map])
+      move(data[:x], data[:y])
+    }
+    player
   end
 end
 
@@ -126,6 +162,38 @@ class Game
     $player.move(5,5)
     $player.fov_map = TCOD.map_new($map.width, $map.height)
     $player.memory_map = Bitfield.new($map.width, $map.height)
+    $map.each_cell do |cell|
+      TCOD.map_set_properties($player.fov_map, cell.x, cell.y, cell.passable?, cell.passable?)
+    end
+  end
+
+  def save(path)
+    mapdata = { 
+      width: $map.width,
+      height: $map.height,
+      cells: [],
+      player: $player.save
+    }
+    0.upto($map.width-1) do |x|
+      mapdata[:cells].push([])
+      0.upto($map.height-1) do |y|
+        mapdata[:cells][x].push(
+          { terrain: $map.cells[x][y].terrain.label }
+        )
+      end
+    end
+    File.write(path, JSON.dump(mapdata))
+  end
+
+  def load(path)
+    mapdata = JSON.parse(File.read(path), symbolize_names: true)
+    $map = Map.new(mapdata[:width], mapdata[:height])
+    $map.each_cell do |cell|
+      celldata = mapdata[:cells][cell.x][cell.y]
+      cell.terrain = Terrain[celldata[:terrain].to_sym]
+    end
+    $player = Player.load(mapdata[:player])
+    $player.fov_map = TCOD.map_new($map.width, $map.height)
     $map.each_cell do |cell|
       TCOD.map_set_properties($player.fov_map, cell.x, cell.y, cell.passable?, cell.passable?)
     end
@@ -159,6 +227,12 @@ class MainGameUI
   end
 
   def on_keypress(key)
+    if key.c == 's'
+      $game.save("save/game.json")
+    elsif key.c == 'l'
+      $game.load("save/game.json")
+    end
+
     if Console.key_pressed?(TCOD::KEY_UP)
       $player.move($player.cell.x, $player.cell.y-1)
     elsif Console.key_pressed?(TCOD::KEY_DOWN)
