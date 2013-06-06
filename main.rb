@@ -405,7 +405,7 @@ class MainGameUI
     $map.tcod_map.compute_fov($player.cell.x, $player.cell.y, 10, true, 0)
 
     $map.cells.each do |cell|
-      visible = true#TCOD.map_is_in_fov($player.fov_map, cell.x, cell.y)
+      visible = $map.tcod_map.in_fov?(cell.x, cell.y)
       remembered = $player.memory_map[cell.x][cell.y]
       terrain = cell.terrain
       obj = cell.contents[-1] || terrain
@@ -424,6 +424,12 @@ class MainGameUI
       end
     end
 
+    if @pet
+      path = $map.path_between(@pet.x, @pet.y, $mouse.cx, $mouse.cy)
+      if path
+        path.each { |x, y| con.set_char_background(x, y, TCOD::Color::GREEN) }
+      end
+    end
     Console.blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0)
   end
 
