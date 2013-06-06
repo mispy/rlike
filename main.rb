@@ -5,6 +5,8 @@ require 'sdl'
 require 'json'
 require 'pry'
 
+$debug_fov = false
+
 #actual size of the window
 SCREEN_WIDTH = 80
 SCREEN_HEIGHT = 50
@@ -238,14 +240,19 @@ class Map
   end
 
   def precompute
-    @tcod_map = TCOD::Map.new($map.width, $map.height)
+    @tcod_map = TCOD::Map.new(@width, @height)
     cells.each do |cell|
       @tcod_map.set_properties(cell.x, cell.y, cell.passable?, cell.passable?)
     end
   end
 
-  def path_between(ox, oy, dx, dy)
-    path = TCOD::Path.using_map(@tcod_map, 1.41)
+  def path_between(ox, oy, dx, dy, &b)
+    if b
+      path = TCOD::Path.by_callback(@width, @height, &b)
+    else
+      path = TCOD::Path.by_map(@tcod_map, 1.41)
+    end
+
     if path.compute(ox, oy, dx, dy)
       path
     else
@@ -310,14 +317,38 @@ class Thing
 end
 
 class Pet < Thing
+   attr_accessor :fov_map
+
    def initialize
      super
-     @char = 'm'
-     @color = TCOD::Color::DESATURATED_CHARTREUSE
+     @char = 'b'
+     @color = TCOD::Color::GREY
      @passable = false
+
+     @fov_map = nil
+   end
+
+   def burrow(x, y)
+     target = $map[x][y]
+     target.terrain = Terrain[:floor]
+     target.put(self)
+   end
+
+   def turn_burrowing
+     if @path.empty?
+       @burrowing = false
+       take_turn
+     else
+       x, y = @path.walk
+       burrow(x, y)
+     end
    end
 
    def take_turn
+      if @burrowing
+        return turn_burrowing
+      end
+
      unless @path
        @path = $map.path_between(@cell.x, @cell.y, $player.x, $player.y)
      end
@@ -333,26 +364,47 @@ class Pet < Thing
      end
    end
 
-   def set_destination(x, y)
-     @path = $map.path_between(@cell.x, @cell.y, x, y)
+   def path_to(x, y, burrow=false)
+     if burrow
+       $map.path_between(@cell.x, @cell.y, x, y) { 1.0 }
+     else
+       $map.path_between(@cell.x, @cell.y, x, y)
+     end
+   end
+
+   ### Orders
+
+   def order_move(x, y)
+     @path = path_to(x, y)
+   end
+
+   def order_burrow(x, y)
+     @burrowing = true
+     @path = path_to(x, y, true)
    end
 end
 
 class Player < Thing
-  attr_accessor :memory_map
+  attr_accessor :memory_map, :fov_map
   attr_reader :pets
 
   def initialize
     super
     @char = '@'
     @color = TCOD::Color::WHITE
-    @memory_map = nil # Exploration state map
     @pets = []
     @passable = false
+    @memory_map = nil # Exploration state map
+
+    @fov_map = nil
   end
 
   def summon_pets
     @cell.adjacent.find_all { |x| x.passable? }.sample.put(@pets[0])
+  end
+
+  def and_pets
+    [self]+@pets
   end
 end
 
@@ -391,6 +443,9 @@ class Game
     $map.precompute
 
     $player.memory_map = Bitfield.new($map.width, $map.height)
+    $player.and_pets.each do |cre|
+      cre.fov_map = $map.tcod_map.clone
+    end
   end
 end
 
@@ -398,14 +453,27 @@ end
 class MainGameUI
   def initialize
     @pet = nil # Selected pet
+    @burrowing = false
   end
 
   def render(console)
     con = TCOD::Console.new($map.width, $map.height) # Temporary console
-    $map.tcod_map.compute_fov($player.cell.x, $player.cell.y, 10, true, 0)
+    $player.and_pets.each do |cre|
+      cre.fov_map.compute_fov(cre.x, cre.y, 10, true, 0)
+    end
 
     $map.cells.each do |cell|
-      visible = $map.tcod_map.in_fov?(cell.x, cell.y)
+      if $debug_fov
+        visible = true
+      else
+        visible = false
+        $player.and_pets.each do |cre|
+          if cre.fov_map.in_fov?(cell.x, cell.y)
+            visible = true; break
+          end
+        end
+      end
+
       remembered = $player.memory_map[cell.x][cell.y]
       terrain = cell.terrain
       obj = cell.contents[-1] || terrain
@@ -425,9 +493,16 @@ class MainGameUI
     end
 
     if @pet
-      path = $map.path_between(@pet.x, @pet.y, $mouse.cx, $mouse.cy)
-      if path
-        path.each { |x, y| con.set_char_background(x, y, TCOD::Color::GREEN) }
+      if @burrowing
+        path = @pet.path_to($mouse.cx, $mouse.cy, true)
+        if path
+          path.each { |x, y| con.set_char_background(x, y, TCOD::Color::GREY) }
+        end
+      else
+        path = @pet.path_to($mouse.cx, $mouse.cy)
+        if path
+          path.each { |x, y| con.set_char_background(x, y, TCOD::Color::GREEN) }
+        end
       end
     end
     Console.blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0)
@@ -436,11 +511,20 @@ class MainGameUI
   # Handle keypress in state where a pet has been previously
   # assigned to @pet
   def on_pet_keypress(key)
-    
+    case key.c
+    when 'b' then
+      @burrowing = !@burrowing
+    end
   end
 
   # Handle keypress in main game state
   def on_main_keypress(key)
+    if key.lalt
+      case key.c
+      when 'f' then $debug_fov = !$debug_fov
+      end
+    end
+
     # Keypress in main state
     p key.c
     case key.c
@@ -485,7 +569,11 @@ class MainGameUI
 
   def on_lclick
     if @pet
-      @pet.set_destination($mouse.cx, $mouse.cy)
+      if @burrowing
+        @pet.order_burrow($mouse.cx, $mouse.cy)
+      else
+        @pet.order_move($mouse.cx, $mouse.cy)
+      end
       @pet = nil
     end
   end
