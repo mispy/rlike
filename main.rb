@@ -238,15 +238,15 @@ class Map
   end
 
   def precompute
-    @tcod_map = TCOD.map_new($map.width, $map.height)
+    @tcod_map = TCOD::Map.new($map.width, $map.height)
     cells.each do |cell|
-      TCOD.map_set_properties(@tcod_map, cell.x, cell.y, cell.passable?, cell.passable?)
+      @tcod_map.set_properties(cell.x, cell.y, cell.passable?, cell.passable?)
     end
   end
 
   def path_between(ox, oy, dx, dy)
-    path = TCOD.path_new_using_map(@tcod_map, 1.41)
-    if TCOD.path_compute(path, ox, oy, dx, dy)
+    path = TCOD::Path.using_map(@tcod_map, 1.41)
+    if path.compute(ox, oy, dx, dy)
       path
     else
       nil
@@ -324,13 +324,12 @@ class Pet < Thing
 
      return unless @path
 
-     px = FFI::MemoryPointer.new(:int)
-     py = FFI::MemoryPointer.new(:int)
-     if TCOD.path_walk(@path, px, py, true)
-       move(px.read_int, py.read_int)
-     else
+     if @path.empty?
        @path = nil
        take_turn
+     else
+       x, y = @path.walk
+       move(x, y)
      end
    end
 end
@@ -393,9 +392,13 @@ end
 
 
 class MainGameUI
+  def initialize
+    @selected = nil # Selected object
+  end
+
   def render(console)
     con = TCOD::Console.new($map.width, $map.height) # Temporary console
-    TCOD.map_compute_fov($map.tcod_map, $player.cell.x, $player.cell.y, 10, true, 0)
+    $map.tcod_map.compute_fov($player.cell.x, $player.cell.y, 10, true, 0)
 
     $map.cells.each do |cell|
       visible = true#TCOD.map_is_in_fov($player.fov_map, cell.x, cell.y)
@@ -405,7 +408,11 @@ class MainGameUI
 
       if visible
         $player.memory_map[cell.x][cell.y] = true
-        con.put_char_ex(cell.x, cell.y, obj.char, obj.color, terrain.color)
+        if obj == @selected
+          con.put_char_ex(cell.x, cell.y, obj.char, obj.color, TCOD::Color::WHITE)
+        else
+          con.put_char_ex(cell.x, cell.y, obj.char, obj.color, terrain.color)
+        end
       elsif remembered
         con.put_char_ex(cell.x, cell.y, obj.char, obj.color * 0.5, terrain.color * 0.5)
       else
@@ -416,8 +423,19 @@ class MainGameUI
     Console.blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0)
   end
 
-  def on_keypress(key)
+  # Handle keypress in state where a pet has been previously
+  # assigned to @selected
+  def on_pet_keypress(key)
+    
+  end
+
+  # Handle keypress in main game state
+  def on_main_keypress(key)
+    # Keypress in main state
+    p key.c
     case key.c
+    when '1' then
+      @selected = $player.pets[0]
     when 's' then $game.save("save/game.json")
     when 'l' then $game.load("save/game.json")
     when '`' then binding.pry
@@ -440,6 +458,15 @@ class MainGameUI
     elsif Console.key_pressed?(TCOD::KEY_RIGHT)
       $player.move($player.cell.x+1, $player.cell.y)
     end
+  end
+
+  def on_keypress(key)
+    if @selected
+      on_pet_keypress(key)
+    else
+      on_main_keypress(key)
+    end
+
 
     $map.things.each do |thing|
       thing.take_turn
