@@ -332,6 +332,10 @@ class Pet < Thing
        move(x, y)
      end
    end
+
+   def set_destination(x, y)
+     @path = $map.path_between(@cell.x, @cell.y, x, y)
+   end
 end
 
 class Player < Thing
@@ -393,7 +397,7 @@ end
 
 class MainGameUI
   def initialize
-    @selected = nil # Selected object
+    @pet = nil # Selected pet
   end
 
   def render(console)
@@ -408,7 +412,7 @@ class MainGameUI
 
       if visible
         $player.memory_map[cell.x][cell.y] = true
-        if obj == @selected
+        if obj == @pet || (cell.x == $mouse.cx && cell.y == $mouse.cy)
           con.put_char_ex(cell.x, cell.y, obj.char, obj.color, TCOD::Color::WHITE)
         else
           con.put_char_ex(cell.x, cell.y, obj.char, obj.color, terrain.color)
@@ -424,7 +428,7 @@ class MainGameUI
   end
 
   # Handle keypress in state where a pet has been previously
-  # assigned to @selected
+  # assigned to @pet
   def on_pet_keypress(key)
     
   end
@@ -435,7 +439,7 @@ class MainGameUI
     p key.c
     case key.c
     when '1' then
-      @selected = $player.pets[0]
+      @pet = $player.pets[0]
     when 's' then $game.save("save/game.json")
     when 'l' then $game.load("save/game.json")
     when '`' then binding.pry
@@ -461,7 +465,7 @@ class MainGameUI
   end
 
   def on_keypress(key)
-    if @selected
+    if @pet
       on_pet_keypress(key)
     else
       on_main_keypress(key)
@@ -470,6 +474,13 @@ class MainGameUI
 
     $map.things.each do |thing|
       thing.take_turn
+    end
+  end
+
+  def on_lclick
+    if @pet
+      @pet.set_destination($mouse.cx, $mouse.cy)
+      @pet = nil
     end
   end
 end
@@ -514,6 +525,7 @@ class Menu
   def on_keypress(key)
     
   end
+
 end
 
 trap('SIGINT') { exit! }
@@ -528,13 +540,19 @@ trap('SIGINT') { exit! }
 
 $game = Game.new
 $ui = MainGameUI.new
+$key = TCOD::Key.new
+$mouse = TCOD::Mouse.new
+
 until Console.window_closed?
   $ui.render(Console)
   Console.flush
 
-  key = Console.check_for_keypress
-  if key.vk != TCOD::KEY_NONE
-    exit! if key.vk == TCOD::KEY_ESCAPE
-    $ui.on_keypress(key)
+  TCOD.sys_check_for_event(TCOD::EVENT_KEY_PRESS | TCOD::EVENT_MOUSE, $key, $mouse)
+
+  if $key.vk != TCOD::KEY_NONE
+    exit! if $key.vk == TCOD::KEY_ESCAPE
+    $ui.on_keypress($key)
+  elsif $mouse.lbutton_pressed
+    $ui.on_lclick
   end
 end
