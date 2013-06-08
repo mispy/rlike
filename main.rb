@@ -99,6 +99,12 @@ class Cell
     end
     a
   end
+
+  # Directional lookup
+  def up; $map[@x][@y-1]; end
+  def down; $map[@x][@y+1]; end
+  def left; $map[@x-1][@y]; end
+  def right; $map[@x+1][@y]; end
 end
 
 class TerrainType
@@ -108,13 +114,38 @@ class TerrainType
     @char = char
     @color = color
     @passable = passable
+
+    @@types ||= {}
+    @@types[@label] = self
+  end
+
+  def self.[](type)
+    @@types[type]
   end
 end
 
-Terrain = {
-  floor: TerrainType.new(:floor, ' ', TCOD::Color.rgb(77,60,41), true),
-  wall: TerrainType.new(:wall, ' ', TCOD::Color::WHITE, false)
-}
+
+TerrainType.new(:floor, ' ', TCOD::Color.rgb(77,60,41), true)
+TerrainType.new(:wall, ' ', TCOD::Color::WHITE, false)
+
+class CreatureType
+  attr_reader :label, :char, :color
+  def initialize(label, char, color)
+    @label = label
+    @char = char
+    @color = color
+
+    @@types ||= {}
+    @@types[label] = self
+  end
+
+  def self.[](type)
+    @@types[type] or raise ArgumentError, "No such CreatureType: #{type.inspect}"
+  end
+end
+
+CreatureType.new(:player, '@', TCOD::Color::WHITE)
+CreatureType.new(:burrower, 'b', TCOD::Color::GREY)
 
 class Rect
   attr_accessor :x1, :y1, :x2, :y2
@@ -150,7 +181,7 @@ class Mapgen
       0.upto(width-1) do |x|
         @cellmap.push([])
         0.upto(height-1) do |y|
-          @cellmap[x].push(Cell.new(x, y, Terrain[:wall]))
+          @cellmap[x].push(Cell.new(x, y, TerrainType[:wall]))
         end
       end
     end
@@ -160,20 +191,20 @@ class Mapgen
   def paint_room(room)
     (room.x1 ... room.x2).each do |x|
       (room.y1 ... room.y2).each do |y|
-        @map[x][y].terrain = Terrain[:floor]
+        @map[x][y].terrain = TerrainType[:floor]
       end
     end
   end
 
   def paint_htunnel(x1, x2, y)
     ([x1,x2].min .. [x1,x2].max).each do |x|
-      @map[x][y].terrain = Terrain[:floor]
+      @map[x][y].terrain = TerrainType[:floor]
     end
   end
 
   def paint_vtunnel(y1, y2, x)
     ([y1,y2].min .. [y1,y2].max).each do |y|
-      @map[x][y].terrain = Terrain[:floor]
+      @map[x][y].terrain = TerrainType[:floor]
     end
   end
 
@@ -296,107 +327,131 @@ class Map
 end
 
 class Thing
-  attr_accessor :char, :color, :cell, :passable
+  attr_accessor :char, :color, :passable
+  attr_accessor :cell
 
   def initialize
     @char = '?'
     @color = TCOD::Color::PINK
     @passable = true
+
+    @cell = nil
   end
 
   def x; @cell.x; end
   def y; @cell.y; end
 
-  def move(x, y)
-    target = $map[x][y]
-    return unless target.passable?
-    target.put(self)
-  end
-
   def take_turn; end
 end
 
-class Pet < Thing
-   attr_accessor :fov_map
+class Creature < Thing
+  attr_accessor :tamer, :pets, :memory_map
+  attr_accessor :fov_map
 
-   def initialize
-     super
-     @char = 'b'
-     @color = TCOD::Color::GREY
-     @passable = false
+  def initialize(type)
+    super()
+    @passable = false # No known Creature is passable.
 
-     @fov_map = nil
-   end
+    @tamer = nil # Empath we are bound to (currently always the player)
+    @pets = [] # Pets we are bound to (currently player-only)
+    @memory_map = nil # Memory map bitfield (currently player-only)
 
-   def burrow(x, y)
-     target = $map[x][y]
-     target.terrain = Terrain[:floor]
-     target.put(self)
-   end
+    @fov_map = nil # TCOD data structure for pet/player FOV calcs.
 
-   def turn_burrowing
-     if @path.empty?
-       @burrowing = false
-       take_turn
-     else
-       x, y = @path.walk
-       burrow(x, y)
-     end
-   end
+    template = CreatureType[type]
+    @char = template.char
+    @color = template.color
+  end
 
-   def take_turn
-      if @burrowing
-        return turn_burrowing
+  # Willful (and therefore blockable) movement
+  # Returns false if movement was impossible
+  def move_to(cell)
+    return false unless cell.terrain.passable # Can't cross unpassable terrain
+
+    displace = nil
+    cell.contents.each do |obj|
+      if !obj.passable
+        if can_displace?(obj)
+          displace = obj # Swap positions with a pet
+        else
+          return false
+        end
       end
+    end
 
-     unless @path
-       @path = $map.path_between(@cell.x, @cell.y, $player.x, $player.y)
-     end
+    @cell.put(displace) if displace
+    cell.put(self)
+  end
 
-     return unless @path
+  # Test for a pet/tamer relationship
+  def bound_to?(obj)
+    @tamer == obj || obj.tamer == self
+  end
 
-     if @path.empty?
-       @path = nil
-       take_turn
-     else
-       x, y = @path.walk
-       move(x, y)
-     end
-   end
+  # Test for ability to swap positions
+  def can_displace?(obj)
+    obj.is_a?(Creature) && self.bound_to?(obj)
+  end
 
-   def path_to(x, y, burrow=false)
-     if burrow
-       $map.path_between(@cell.x, @cell.y, x, y) { 1.0 }
-     else
-       $map.path_between(@cell.x, @cell.y, x, y)
-     end
-   end
+  def burrow(x, y)
+    target = $map[x][y]
+    target.terrain = TerrainType[:floor]
+    target.put(self)
+  end
 
-   ### Orders
+  def turn_burrowing
+    if @path.empty?
+      @burrowing = false
+      take_turn
+    else
+      x, y = @path.walk
+      burrow(x, y)
+    end
+  end
 
-   def order_move(x, y)
-     @path = path_to(x, y)
-   end
+  def take_turn
+    if @burrowing
+      return turn_burrowing
+    end
 
-   def order_burrow(x, y)
-     @burrowing = true
-     @path = path_to(x, y, true)
-   end
+    unless @path
+      @path = $map.path_between(@cell.x, @cell.y, $player.x, $player.y)
+    end
+
+    return unless @path
+
+    if @path.empty?
+      @path = nil
+      take_turn
+    else
+      x, y = @path.walk
+      move_to($map[x][y])
+    end
+  end
+
+  def path_to(x, y, burrow=false)
+    if burrow
+      $map.path_between(@cell.x, @cell.y, x, y) { 1.0 }
+    else
+      $map.path_between(@cell.x, @cell.y, x, y)
+    end
+  end
+
+  ### Orders
+
+  def order_move(x, y)
+    @path = path_to(x, y)
+  end
+
+  def order_burrow(x, y)
+    @burrowing = true
+    @path = path_to(x, y, true)
+  end
 end
 
-class Player < Thing
-  attr_accessor :memory_map, :fov_map
-  attr_reader :pets
-
+class Player < Creature
   def initialize
-    super
-    @char = '@'
-    @color = TCOD::Color::WHITE
-    @pets = []
-    @passable = false
-    @memory_map = nil # Exploration state map
-
-    @fov_map = nil
+    super(:player)
   end
 
   def summon_pets
@@ -406,6 +461,8 @@ class Player < Thing
   def and_pets
     [self]+@pets
   end
+
+  def take_turn; end
 end
 
 class Staircase < Thing
@@ -431,7 +488,7 @@ end
 class Game
   def initialize
     $player = Player.new
-    $player.pets.push(Pet.new)
+    $player.pets.push(Creature.new(:burrower))
     change_map($mapgen.classic(SCREEN_WIDTH, SCREEN_HEIGHT))
     $map.upstair.put($player)
     $player.summon_pets
@@ -505,6 +562,9 @@ class MainGameUI
         end
       end
     end
+
+    con.print_rect(0, 0, 10, 10, "Mispy")
+
     Console.blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0)
   end
 
@@ -544,13 +604,13 @@ class MainGameUI
     end
 
     if Console.key_pressed?(TCOD::KEY_UP)
-      $player.move($player.cell.x, $player.cell.y-1)
+      $player.move_to($player.cell.up)
     elsif Console.key_pressed?(TCOD::KEY_DOWN)
-      $player.move($player.cell.x, $player.cell.y+1)
+      $player.move_to($player.cell.down)
     elsif Console.key_pressed?(TCOD::KEY_LEFT)
-      $player.move($player.cell.x-1, $player.cell.y)
+      $player.move_to($player.cell.left)
     elsif Console.key_pressed?(TCOD::KEY_RIGHT)
-      $player.move($player.cell.x+1, $player.cell.y)
+      $player.move_to($player.cell.right)
     end
   end
 
