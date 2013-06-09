@@ -15,6 +15,10 @@ LIMIT_FPS = 20  #20 frames-per-second maximum
 
 Console = TCOD::Console.root
 
+def debug(*args)
+  puts args.map(&:to_s).join(' ')
+end
+
 module TCOD
   class Color
     def save
@@ -86,6 +90,10 @@ class Cell
     @contents.push(obj)
   end
 
+  def distance_to(obj)
+    Math.sqrt((obj.x - @x)**2 + (obj.y - @y)**2)
+  end
+
   # List all immediately adjacent cells
   def adjacent
     a = []
@@ -129,11 +137,12 @@ TerrainType.new(:floor, ' ', TCOD::Color.rgb(77,60,41), true)
 TerrainType.new(:wall, ' ', TCOD::Color::WHITE, false)
 
 class CreatureType
-  attr_reader :label, :char, :color
-  def initialize(label, char, color)
+  attr_reader :label, :char, :color, :fov_range
+  def initialize(label, char, color, fov_range)
     @label = label
     @char = char
     @color = color
+    @fov_range = fov_range
 
     @@types ||= {}
     @@types[label] = self
@@ -144,8 +153,9 @@ class CreatureType
   end
 end
 
-CreatureType.new(:player, '@', TCOD::Color::WHITE)
-CreatureType.new(:burrower, 'b', TCOD::Color::GREY)
+CreatureType.new(:player, '@', TCOD::Color::WHITE, 8)
+CreatureType.new(:burrower, 'b', TCOD::Color::GREY, 8)
+CreatureType.new(:nommer, 'n', TCOD::Color::RED, 8)
 
 class Rect
   attr_accessor :x1, :y1, :x2, :y2
@@ -277,6 +287,10 @@ class Map
     end
   end
 
+  def creatures
+    cells.map { |cell| cell.contents.find_all { |obj| obj.is_a? Creature } }.flatten
+  end
+
   def path_between(ox, oy, dx, dy, &b)
     if b
       path = TCOD::Path.by_callback(@width, @height, &b)
@@ -346,7 +360,7 @@ end
 
 class Creature < Thing
   attr_accessor :tamer, :pets, :memory_map
-  attr_accessor :fov_map
+  attr_accessor :fov_map, :fov_range
 
   def initialize(type)
     super()
@@ -358,9 +372,11 @@ class Creature < Thing
 
     @fov_map = nil # TCOD data structure for pet/player FOV calcs.
 
-    template = CreatureType[type]
-    @char = template.char
-    @color = template.color
+    @type = type
+    @template = CreatureType[@type]
+    @char = @template.char
+    @color = @template.color
+    @fov_range = @template.fov_range
   end
 
   # Willful (and therefore blockable) movement
@@ -390,7 +406,7 @@ class Creature < Thing
 
   # Test for ability to swap positions
   def can_displace?(obj)
-    obj.is_a?(Creature) && self.bound_to?(obj)
+    obj.is_a?(Creature) && @pets.include?(obj)
   end
 
   def burrow(x, y)
@@ -409,17 +425,7 @@ class Creature < Thing
     end
   end
 
-  def take_turn
-    if @burrowing
-      return turn_burrowing
-    end
-
-    unless @path
-      @path = $map.path_between(@cell.x, @cell.y, $player.x, $player.y)
-    end
-
-    return unless @path
-
+  def turn_walk_path
     if @path.empty?
       @path = nil
       take_turn
@@ -429,23 +435,71 @@ class Creature < Thing
     end
   end
 
-  def path_to(x, y, burrow=false)
-    if burrow
-      $map.path_between(@cell.x, @cell.y, x, y) { 1.0 }
+  def take_pet_turn
+    return turn_burrowing if @burrowing
+    return turn_walk_path if @path
+
+    # Nothing else to do, go to player
+    @path = $map.path_between(@cell.x, @cell.y, $player.x, $player.y)
+    take_turn if @path && !@path.empty? # Unless we can't get there
+  end
+
+  def random_walk
+    move_to(@cell.adjacent.sample)
+  end
+
+  def can_see?(obj)
+    @cell.distance_to(obj) < @fov_range
+  end
+
+  def turn_pursue_target
+  end
+
+  def take_wild_turn
+    return turn_walk_path if @path
+
+    target = $map.creatures.find do |cre|
+      can_see?(cre) && cre != self
+    end
+
+    if target
+      @path = path_to(target.cell)
     else
-      $map.path_between(@cell.x, @cell.y, x, y)
+      random_walk
+    end
+  end
+
+  def take_turn
+    if @tamer
+      take_pet_turn
+    else
+      take_wild_turn
+    end
+  end
+
+  def path_to(cell, burrow=false)
+    if burrow
+      $map.path_between(@cell.x, @cell.y, cell.x, cell.y) { 1.0 }
+    else
+      $map.path_between(@cell.x, @cell.y, cell.x, cell.y)
     end
   end
 
   ### Orders
 
-  def order_move(x, y)
-    @path = path_to(x, y)
+  def order_move(cell)
+    @path = path_to(cell)
   end
 
-  def order_burrow(x, y)
+  def order_burrow(cell)
     @burrowing = true
-    @path = path_to(x, y, true)
+    @path = path_to(cell, true)
+  end
+
+  ### Debug
+  
+  def to_s
+    "<Creature :#{@type} (#{x},#{y})>"
   end
 end
 
@@ -479,7 +533,7 @@ class Staircase < Thing
     $game.change_map($mapgen.classic(SCREEN_WIDTH, SCREEN_HEIGHT))
     opposite = (@dir == :down ? :up : :down)
     cell = $map.cells.find { |c| c.contents.find { |obj| obj.is_a?(Staircase) && obj.dir == opposite } }
-    $player.move(cell.x,cell.y)
+    cell.put($player)
     $player.summon_pets
   end
 end
@@ -488,10 +542,15 @@ end
 class Game
   def initialize
     $player = Player.new
-    $player.pets.push(Creature.new(:burrower))
+    burrower = Creature.new(:burrower)
+    burrower.tamer = $player
+    $player.pets.push(burrower)
     change_map($mapgen.classic(SCREEN_WIDTH, SCREEN_HEIGHT))
     $map.upstair.put($player)
     $player.summon_pets
+
+    enemy = Creature.new(:nommer)
+    $map.some_passable_cell.put(enemy)
   end
   
   def change_map(new_map)
@@ -516,7 +575,7 @@ class MainGameUI
   def render(console)
     con = TCOD::Console.new($map.width, $map.height) # Temporary console
     $player.and_pets.each do |cre|
-      cre.fov_map.compute_fov(cre.x, cre.y, 10, true, 0)
+      cre.fov_map.compute_fov(cre.x, cre.y, cre.fov_range, true, 0)
     end
 
     $map.cells.each do |cell|
@@ -551,12 +610,12 @@ class MainGameUI
 
     if @pet
       if @burrowing
-        path = @pet.path_to($mouse.cx, $mouse.cy, true)
+        path = @pet.path_to($map[$mouse.cx][$mouse.cy], true)
         if path
           path.each { |x, y| con.set_char_background(x, y, TCOD::Color::GREY) }
         end
       else
-        path = @pet.path_to($mouse.cx, $mouse.cy)
+        path = @pet.path_to($map[$mouse.cx][$mouse.cy])
         if path
           path.each { |x, y| con.set_char_background(x, y, TCOD::Color::GREEN) }
         end
@@ -586,7 +645,6 @@ class MainGameUI
     end
 
     # Keypress in main state
-    p key.c
     case key.c
     when '1' then
       @pet = $player.pets[0]
@@ -630,9 +688,9 @@ class MainGameUI
   def on_lclick
     if @pet
       if @burrowing
-        @pet.order_burrow($mouse.cx, $mouse.cy)
+        @pet.order_burrow($map[$mouse.cx][$mouse.cy])
       else
-        @pet.order_move($mouse.cx, $mouse.cy)
+        @pet.order_move($map[$mouse.cx][$mouse.cy])
       end
       @pet = nil
     end
