@@ -4,6 +4,7 @@ require 'libtcod'
 require 'sdl'
 require 'json'
 require 'pry'
+require 'active_support/core_ext'
 
 $debug_fov = false
 
@@ -65,6 +66,23 @@ class Bitfield
   end
 end
 
+class Template
+  attr_reader :label, :char, :color, :passable
+  def initialize(label, char, color, passable)
+    @label = label
+    @char = char
+    @color = color
+    @passable = passable
+
+    @@types ||= {}
+    @@types[@label] = self
+  end
+
+  def self.[](type)
+    @@types[type]
+  end
+end
+
 class Cell
   attr_reader :x, :y
   attr_accessor :contents, :terrain
@@ -115,7 +133,7 @@ class Cell
   def right; $map[@x+1][@y]; end
 end
 
-class TerrainType
+class Terrain
   attr_reader :label, :char, :color, :passable
   def initialize(label, char, color, passable)
     @label = label
@@ -128,15 +146,15 @@ class TerrainType
   end
 
   def self.[](type)
-    @@types[type]
+    @@types[type] or raise ArgumentError, "No such Terrain: #{type.inspect}"
   end
 end
 
 
-TerrainType.new(:floor, ' ', TCOD::Color.rgb(77,60,41), true)
-TerrainType.new(:wall, ' ', TCOD::Color::WHITE, false)
+Terrain.new(:floor, ' ', TCOD::Color.rgb(77,60,41), true)
+Terrain.new(:wall, ' ', TCOD::Color::WHITE, false)
 
-class CreatureType
+class Species
   attr_reader :label, :char, :color, :fov_range
   def initialize(label, char, color, fov_range)
     @label = label
@@ -149,13 +167,24 @@ class CreatureType
   end
 
   def self.[](type)
-    @@types[type] or raise ArgumentError, "No such CreatureType: #{type.inspect}"
+    @@types[type] or raise ArgumentError, "No such Species: #{type.inspect}"
   end
 end
 
-CreatureType.new(:player, '@', TCOD::Color::WHITE, 8)
-CreatureType.new(:burrower, 'b', TCOD::Color::GREY, 8)
-CreatureType.new(:nommer, 'n', TCOD::Color::RED, 8)
+Species.new(:player, '@', TCOD::Color::WHITE, 8)
+Species.new(:burrower, 'b', TCOD::Color::GREY, 8)
+Species.new(:nommer, 'n', TCOD::Color::RED, 8)
+
+class Ability
+  attr_reader :label
+  def initialize(label)
+    @label = label
+  end
+
+  def self.[](type)
+    @@types[type] or raise ArgumentError, "No such Ability: #{type.inspect}"
+  end
+end
 
 class Rect
   attr_accessor :x1, :y1, :x2, :y2
@@ -191,7 +220,7 @@ class Mapgen
       0.upto(width-1) do |x|
         @cellmap.push([])
         0.upto(height-1) do |y|
-          @cellmap[x].push(Cell.new(x, y, TerrainType[:wall]))
+          @cellmap[x].push(Cell.new(x, y, Terrain[:wall]))
         end
       end
     end
@@ -201,20 +230,20 @@ class Mapgen
   def paint_room(room)
     (room.x1 ... room.x2).each do |x|
       (room.y1 ... room.y2).each do |y|
-        @map[x][y].terrain = TerrainType[:floor]
+        @map[x][y].terrain = Terrain[:floor]
       end
     end
   end
 
   def paint_htunnel(x1, x2, y)
     ([x1,x2].min .. [x1,x2].max).each do |x|
-      @map[x][y].terrain = TerrainType[:floor]
+      @map[x][y].terrain = Terrain[:floor]
     end
   end
 
   def paint_vtunnel(y1, y2, x)
     ([y1,y2].min .. [y1,y2].max).each do |y|
-      @map[x][y].terrain = TerrainType[:floor]
+      @map[x][y].terrain = Terrain[:floor]
     end
   end
 
@@ -373,7 +402,7 @@ class Creature < Thing
     @fov_map = nil # TCOD data structure for pet/player FOV calcs.
 
     @type = type
-    @template = CreatureType[@type]
+    @template = Species[@type]
     @char = @template.char
     @color = @template.color
     @fov_range = @template.fov_range
@@ -411,7 +440,7 @@ class Creature < Thing
 
   def burrow(x, y)
     target = $map[x][y]
-    target.terrain = TerrainType[:floor]
+    target.terrain = Terrain[:floor]
     target.put(self)
   end
 
@@ -540,6 +569,8 @@ end
 
 
 class Game
+  attr_accessor :log
+
   def initialize
     $player = Player.new
     burrower = Creature.new(:burrower)
@@ -548,6 +579,9 @@ class Game
     change_map($mapgen.classic(SCREEN_WIDTH, SCREEN_HEIGHT))
     $map.upstair.put($player)
     $player.summon_pets
+
+    $log = MessageLog.new
+    $log.messages.push("Hullo there!")
 
     enemy = Creature.new(:nommer)
     $map.some_passable_cell.put(enemy)
@@ -562,6 +596,26 @@ class Game
     $player.and_pets.each do |cre|
       cre.fov_map = $map.tcod_map.clone
     end
+  end
+end
+
+class MessageLog
+  attr_accessor :messages
+
+  def initialize
+    @messages = []
+  end
+   
+  def render(console, x, y, width, height)
+    con = TCOD::Console.new(width, height)
+
+    start = [0, @messages.length-height].max
+
+    @messages.from(start).each_with_index do |msg, i|
+      con.print_rect(0, i, width, height, msg)
+    end
+
+    console.blit(con, 0, 0, width, height, x, y)
   end
 end
 
@@ -623,6 +677,8 @@ class MainGameUI
     end
 
     con.print_rect(0, 0, 10, 10, "Mispy")
+
+    $log.render(con, 0, SCREEN_HEIGHT-3, SCREEN_WIDTH, 3)
 
     Console.blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0)
   end
