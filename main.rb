@@ -6,6 +6,7 @@ require 'json'
 require 'pry'
 require 'active_support/core_ext'
 
+$debug = true
 $debug_fov = false
 
 #actual size of the window
@@ -13,6 +14,8 @@ SCREEN_WIDTH = 80
 SCREEN_HEIGHT = 50
  
 LIMIT_FPS = 20  #20 frames-per-second maximum
+
+MAX_MAP_CREATURES = 20
 
 Console = TCOD::Console.root
 
@@ -481,6 +484,10 @@ class Creature < Thing
     @cell.distance_to(obj) < @fov_range
   end
 
+  def dislikes?(obj)
+    @tamer != $player && (obj == $player || obj.tamer == $player)
+  end
+
   def turn_pursue_target
   end
 
@@ -488,7 +495,7 @@ class Creature < Thing
     return turn_walk_path if @path
 
     target = $map.creatures.find do |cre|
-      can_see?(cre) && cre != self
+      dislikes?(cre) && can_see?(cre)
     end
 
     if target
@@ -597,6 +604,16 @@ class Game
       cre.fov_map = $map.tcod_map.clone
     end
   end
+
+  def end_turn
+    $map.things.each do |thing|
+      thing.take_turn
+    end
+    
+    if rand < 0.01 && $map.downstair.passable? && $map.creatures.length < MAX_MAP_CREATURES
+      $map.downstair.put(Creature.new(:nommer))
+    end
+  end
 end
 
 class MessageLog
@@ -621,12 +638,16 @@ end
 
 
 class MainGameUI
+  STATE_MAIN = :main
+  STATE_LOG = :show_log
+
   def initialize
     @pet = nil # Selected pet
     @burrowing = false
+    @state = STATE_MAIN
   end
 
-  def render(console)
+  def render_main
     con = TCOD::Console.new($map.width, $map.height) # Temporary console
     $player.and_pets.each do |cre|
       cre.fov_map.compute_fov(cre.x, cre.y, cre.fov_range, true, 0)
@@ -683,6 +704,17 @@ class MainGameUI
     Console.blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0)
   end
 
+  def render_log
+    $log.render(Console, 0, 0, SCREEN_HEIGHT, SCREEN_WIDTH)
+  end
+
+  def render
+    case @state
+    when STATE_MAIN then render_main
+    when STATE_LOG then render_log
+    end
+  end
+
   # Handle keypress in state where a pet has been previously
   # assigned to @pet
   def on_pet_keypress(key)
@@ -694,18 +726,26 @@ class MainGameUI
 
   # Handle keypress in main game state
   def on_main_keypress(key)
-    if key.lalt
+    # Keypress in main state
+    if $debug && (key.lalt || key.ralt)
       case key.c
+      when 'l' then $log.messages.push("boop"*rand(10))
       when 'f' then $debug_fov = !$debug_fov
       end
     end
 
-    # Keypress in main state
+    if key.lctrl || key.rctrl
+      case key.c
+      when 's' then $game.save("save/game.json")
+      when 'l' then $game.load("save/game.json")
+      end
+    end
+
     case key.c
     when '1' then
       @pet = $player.pets[0]
-    when 's' then $game.save("save/game.json")
-    when 'l' then $game.load("save/game.json")
+    when 'L' then
+      @state = STATE_LOG
     when '`' then binding.pry
     when '>'
       $player.cell.contents.each do |obj|
@@ -728,17 +768,22 @@ class MainGameUI
     end
   end
 
+  def on_log_keypress(key)
+    @state = STATE_MAIN
+  end
+
   def on_keypress(key)
-    if @pet
-      on_pet_keypress(key)
-    else
-      on_main_keypress(key)
+    case @state
+    when STATE_MAIN
+      if @pet
+        on_pet_keypress(key)
+      else
+        on_main_keypress(key)
+      end
+    when STATE_LOG then on_log_keypress(key)
     end
 
-
-    $map.things.each do |thing|
-      thing.take_turn
-    end
+    $game.end_turn
   end
 
   def on_lclick
@@ -812,7 +857,7 @@ $key = TCOD::Key.new
 $mouse = TCOD::Mouse.new
 
 until Console.window_closed?
-  $ui.render(Console)
+  $ui.render
   Console.flush
 
   TCOD.sys_check_for_event(TCOD::EVENT_KEY_PRESS | TCOD::EVENT_MOUSE, $key, $mouse)
