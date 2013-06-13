@@ -412,6 +412,10 @@ class Creature < Thing
     @fov_range = @template.fov_range
   end
 
+  def name # placeholder
+    @type.to_s
+  end
+
   # Willful (and therefore blockable) movement
   # Returns false if movement was impossible
   def move_to(cell)
@@ -648,15 +652,19 @@ class MainGameUI
     @state = STATE_MAIN
   end
 
+  def render_color(color)
+    [:r, :g, :b].map { |c| [color[c]+1, 255].max }.join
+  end
+
   def colorify(s)
     s = s.gsub('{stop}', TCOD::COLCTRL_STOP.chr)
     s = s.gsub(/{bg:(.+?)}/) { |match|
       color = TCOD::Color.const_get(match.gsub('{bg:', '').gsub('}', '').upcase)
-      "#{TCOD::COLCTRL_BACK_RGB.chr}#{color[:r].chr}#{color[:g].chr}#{color[:b].chr}"
+      "#{TCOD::COLCTRL_BACK_RGB.chr}#{render_color(color)}"
     }
     s = s.gsub(/{fg:(.+?)}/) { |match|
       color = TCOD::Color.const_get(match.gsub('{fg:', '').gsub('}', '').upcase)
-      "#{TCOD::COLCTRL_FORE_RGB.chr}#{(color[:r]+1).chr}#{(color[:g]+1).chr}#{(color[:b]+1).chr}"
+      "#{TCOD::COLCTRL_FORE_RGB.chr}#{render_color(color)}"
     }
   end
 
@@ -712,7 +720,22 @@ class MainGameUI
       end
     end
 
+    render_sidebar(con)
+    $log.render(con, 0, SCREEN_HEIGHT-3, SCREEN_WIDTH, 3)
 
+    # Hover inspect
+    $map[$mouse.cx][$mouse.cy].contents.each do |obj|
+      if obj.is_a? Creature
+        con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, obj.name)
+      end
+    end
+
+
+
+    Console.blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0)
+  end
+
+  def render_sidebar(con)
     sidebar = "Mispy\n"
     $player.pets.each_with_index do |pet, i|
       if pet == @pet
@@ -722,10 +745,6 @@ class MainGameUI
       end
     end
     con.print_rect(0, 0, SCREEN_HEIGHT, 10, colorify(sidebar))
-
-    $log.render(con, 0, SCREEN_HEIGHT-3, SCREEN_WIDTH, 3)
-
-    Console.blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0)
   end
 
   def render_log
