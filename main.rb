@@ -393,6 +393,7 @@ end
 class Creature < Thing
   attr_accessor :tamer, :pets, :memory_map
   attr_accessor :fov_map, :fov_range
+  attr_accessor :type, :template, :char, :color
 
   def initialize(type)
     super()
@@ -647,8 +648,22 @@ class MainGameUI
     @state = STATE_MAIN
   end
 
+  def colorify(s)
+    s = s.gsub('{stop}', TCOD::COLCTRL_STOP.chr)
+    s = s.gsub(/{bg:(.+?)}/) { |match|
+      color = TCOD::Color.const_get(match.gsub('{bg:', '').gsub('}', '').upcase)
+      "#{TCOD::COLCTRL_BACK_RGB.chr}#{color[:r].chr}#{color[:g].chr}#{color[:b].chr}"
+    }
+    s = s.gsub(/{fg:(.+?)}/) { |match|
+      color = TCOD::Color.const_get(match.gsub('{fg:', '').gsub('}', '').upcase)
+      "#{TCOD::COLCTRL_FORE_RGB.chr}#{(color[:r]+1).chr}#{(color[:g]+1).chr}#{(color[:b]+1).chr}"
+    }
+  end
+
   def render_main
     con = TCOD::Console.new($map.width, $map.height) # Temporary console
+    con.set_background_flag(TCOD::BKGND_SET)
+
     $player.and_pets.each do |cre|
       cre.fov_map.compute_fov(cre.x, cre.y, cre.fov_range, true, 0)
     end
@@ -697,7 +712,16 @@ class MainGameUI
       end
     end
 
-    con.print_rect(0, 0, 10, 10, "Mispy")
+
+    sidebar = "Mispy\n"
+    $player.pets.each_with_index do |pet, i|
+      if pet == @pet
+        sidebar += "{bg:white}{fg:black}#{i+1}. #{pet.type}{stop}"
+      else
+        sidebar += "#{i+1}. #{pet.type}"
+      end
+    end
+    con.print_rect(0, 0, SCREEN_HEIGHT, 10, colorify(sidebar))
 
     $log.render(con, 0, SCREEN_HEIGHT-3, SCREEN_WIDTH, 3)
 
@@ -727,6 +751,8 @@ class MainGameUI
   # Handle keypress in main game state
   def on_main_keypress(key)
     # Keypress in main state
+
+    # Debug mode overrides
     if $debug && (key.lalt || key.ralt)
       case key.c
       when 'l' then $log.messages.push("boop"*rand(10))
