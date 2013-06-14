@@ -1,7 +1,6 @@
 #!/usr/bin/env ruby
 
 require 'libtcod'
-require 'sdl'
 require 'json'
 require 'pry'
 require 'active_support/core_ext'
@@ -99,6 +98,10 @@ class Cell
 
   def find(objtype)
     @contents.find { |x| x.is_a? objtype }
+  end
+
+  def creatures
+    @contents.find_all { |x| x.is_a? Creature }
   end
 
   def passable?
@@ -394,6 +397,12 @@ class Creature < Thing
   attr_accessor :tamer, :pets, :memory_map
   attr_accessor :fov_map, :fov_range
   attr_accessor :type, :template, :char, :color
+  attr_accessor :action_state
+
+  STATE_IDLE = :idle
+  STATE_MOVING = :moving
+  STATE_FOLLOWING = :following
+  STATE_ATTACKING = :attacking
 
   def initialize(type)
     super()
@@ -410,6 +419,8 @@ class Creature < Thing
     @char = @template.char
     @color = @template.color
     @fov_range = @template.fov_range
+
+    @action_state = STATE_IDLE
   end
 
   def name # placeholder
@@ -474,9 +485,11 @@ class Creature < Thing
 
   def take_pet_turn
     return turn_burrowing if @burrowing
+
     return turn_walk_path if @path
 
     # Nothing else to do, go to player
+    @action_state = STATE_FOLLOWING
     @path = $map.path_between(@cell.x, @cell.y, $player.x, $player.y)
     take_turn if @path && !@path.empty? # Unless we can't get there
   end
@@ -490,7 +503,7 @@ class Creature < Thing
   end
 
   def dislikes?(obj)
-    @tamer != $player && (obj == $player || obj.tamer == $player)
+    obj.tamer != @tamer && obj != @tamer
   end
 
   def turn_pursue_target
@@ -529,6 +542,7 @@ class Creature < Thing
   ### Orders
 
   def order_move(cell)
+    @action_state = STATE_MOVING
     @path = path_to(cell)
   end
 
@@ -653,7 +667,7 @@ class MainGameUI
   end
 
   def render_color(color)
-    [:r, :g, :b].map { |c| [color[c]+1, 255].max }.join
+    [:r, :g, :b].map { |c| [color[c]+1, 255].min.chr }.join
   end
 
   def colorify(s)
@@ -713,9 +727,15 @@ class MainGameUI
           path.each { |x, y| con.set_char_background(x, y, TCOD::Color::GREY) }
         end
       else
-        path = @pet.path_to($map[$mouse.cx][$mouse.cy])
+        cell = $map[$mouse.cx][$mouse.cy]
+        path = @pet.path_to(cell)
         if path
-          path.each { |x, y| con.set_char_background(x, y, TCOD::Color::GREEN) }
+          if cell.creatures.find { |cre| @pet.dislikes?(cre) }
+            color = TCOD::Color::RED
+          else
+            color = TCOD::Color::GREEN
+          end
+          path.each { |x, y| con.set_char_background(x, y, color) }
         end
       end
     end
@@ -739,10 +759,11 @@ class MainGameUI
     sidebar = "Mispy\n"
     $player.pets.each_with_index do |pet, i|
       if pet == @pet
-        sidebar += "{bg:white}{fg:black}#{i+1}. #{pet.type}{stop}"
+        sidebar += "{bg:white}{fg:black}#{i+1}. #{pet.type}{stop}\n"
       else
-        sidebar += "#{i+1}. #{pet.type}"
+        sidebar += "#{i+1}. #{pet.type}\n"
       end
+      sidebar += pet.action_state.to_s + "\n"
     end
     con.print_rect(0, 0, SCREEN_HEIGHT, 10, colorify(sidebar))
   end
@@ -764,6 +785,8 @@ class MainGameUI
     case key.c
     when 'b' then
       @burrowing = !@burrowing
+    when "\r"
+      submit_order if @pet
     end
   end
 
@@ -788,7 +811,11 @@ class MainGameUI
 
     case key.c
     when '1' then
-      @pet = $player.pets[0]
+      if @pet
+        @pet = nil
+      else
+        @pet = $player.pets[0]
+      end
     when 'L' then
       @state = STATE_LOG
     when '`' then binding.pry
@@ -831,14 +858,24 @@ class MainGameUI
     $game.end_turn
   end
 
+  def submit_order
+    if @burrowing
+      @pet.order_burrow($map[$mouse.cx][$mouse.cy])
+    else
+      @pet.order_move($map[$mouse.cx][$mouse.cy])
+    end
+    @pet = nil
+  end
+
   def on_lclick
     if @pet
-      if @burrowing
-        @pet.order_burrow($map[$mouse.cx][$mouse.cy])
-      else
-        @pet.order_move($map[$mouse.cx][$mouse.cy])
+      submit_order
+    else
+      $map[$mouse.cx][$mouse.cy].contents.each do |obj|
+        if obj.tamer == $player
+          @pet = obj
+        end
       end
-      @pet = nil
     end
   end
 end
