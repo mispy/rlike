@@ -326,14 +326,14 @@ class Map
     cells.map { |cell| cell.contents.find_all { |obj| obj.is_a? Creature } }.flatten
   end
 
-  def path_between(ox, oy, dx, dy, &b)
+  def path_between(cell1, cell2, &b)
     if b
       path = TCOD::Path.by_callback(@width, @height, &b)
     else
       path = TCOD::Path.by_map(@tcod_map, 1.41)
     end
 
-    if path.compute(ox, oy, dx, dy)
+    if path.compute(cell1.x, cell1.y, cell2.x, cell2.y)
       path
     else
       nil
@@ -398,6 +398,7 @@ class Creature < Thing
   attr_accessor :fov_map, :fov_range
   attr_accessor :type, :template, :char, :color
   attr_accessor :action_state
+  attr_accessor :hp, :max_hp
 
   STATE_IDLE = :idle
   STATE_MOVING = :moving
@@ -421,6 +422,9 @@ class Creature < Thing
     @fov_range = @template.fov_range
 
     @action_state = STATE_IDLE
+
+    @hp = 5
+    @max_hp = 5
   end
 
   def name # placeholder
@@ -473,25 +477,45 @@ class Creature < Thing
     end
   end
 
-  def turn_walk_path
-    if @path.empty?
-      @path = nil
-      take_turn
+  def walk_path
+    if @path.nil? || @path.empty?
+      false
     else
       x, y = @path.walk
       move_to($map[x][y])
+      true
     end
   end
 
   def take_pet_turn
     return turn_burrowing if @burrowing
 
-    return turn_walk_path if @path
-
-    # Nothing else to do, go to player
-    @action_state = STATE_FOLLOWING
-    @path = $map.path_between(@cell.x, @cell.y, $player.x, $player.y)
-    take_turn if @path && !@path.empty? # Unless we can't get there
+    case @action_state
+    when STATE_IDLE
+      @action_state = STATE_FOLLOWING
+      take_pet_turn
+    when STATE_FOLLOWING
+      unless walk_path
+        @path = path_to($player)
+        walk_path
+      end
+    when STATE_MOVING
+      unless walk_path
+        @action_state = STATE_FOLLOWING
+      end
+    when STATE_ATTACKING
+      if @cell.distance_to(@target) < 5
+        $log.write "#{name} damages #{@target.name} #{@target.hp}/#{@target.max_hp}"
+        @target.hp -= 1
+        if @target.hp == 0
+          @target.cell.contents.delete(@target)
+          @target = nil
+          @action_state = STATE_IDLE
+        end
+      else
+        @path = path_to(@target) unless walk_path
+      end
+    end
   end
 
   def random_walk
@@ -506,11 +530,8 @@ class Creature < Thing
     obj.tamer != @tamer && obj != @tamer
   end
 
-  def turn_pursue_target
-  end
-
   def take_wild_turn
-    return turn_walk_path if @path
+    return walk_path if @path
 
     target = $map.creatures.find do |cre|
       dislikes?(cre) && can_see?(cre)
@@ -531,11 +552,11 @@ class Creature < Thing
     end
   end
 
-  def path_to(cell, burrow=false)
+  def path_to(target, burrow=false)
     if burrow
-      $map.path_between(@cell.x, @cell.y, cell.x, cell.y) { 1.0 }
+      $map.path_between(@cell, target) { 1.0 }
     else
-      $map.path_between(@cell.x, @cell.y, cell.x, cell.y)
+      $map.path_between(@cell, target)
     end
   end
 
@@ -544,6 +565,11 @@ class Creature < Thing
   def order_move(cell)
     @action_state = STATE_MOVING
     @path = path_to(cell)
+  end
+
+  def order_attack(target)
+    @action_state = STATE_ATTACKING
+    @target = target
   end
 
   def order_burrow(cell)
@@ -640,6 +666,10 @@ class MessageLog
 
   def initialize
     @messages = []
+  end
+
+  def write(msg)
+    @messages.push(msg)
   end
    
   def render(console, x, y, width, height)
@@ -862,7 +892,12 @@ class MainGameUI
     if @burrowing
       @pet.order_burrow($map[$mouse.cx][$mouse.cy])
     else
-      @pet.order_move($map[$mouse.cx][$mouse.cy])
+      cell = $map[$mouse.cx][$mouse.cy]
+      if (target = cell.creatures.find { |cre| @pet.dislikes?(cre) })
+        @pet.order_attack(target)
+      else
+        @pet.order_move($map[$mouse.cx][$mouse.cy])
+      end
     end
     @pet = nil
   end
@@ -918,9 +953,7 @@ class Menu
   end
 
   def on_keypress(key)
-    
   end
-
 end
 
 trap('SIGINT') { exit! }
