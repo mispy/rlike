@@ -169,7 +169,7 @@ class Species
     @fov_range = fov_range
 
     @@types ||= {}
-    @@types[label] = self
+    @@types[@label] = self
   end
 
   def self.[](type)
@@ -183,12 +183,22 @@ Species.new(:nommer, 'n', TCOD::Color::RED, 8)
 
 class Ability
   attr_reader :label
-  def initialize(label)
+  def initialize(label, opts={})
     @label = label
   end
 
   def self.[](type)
     @@types[type] or raise ArgumentError, "No such Ability: #{type.inspect}"
+  end
+end
+
+class Effect
+  def new(&block)
+    @block = block
+  end
+
+  def render(con)
+    @block.call(con)
   end
 end
 
@@ -393,17 +403,69 @@ class Thing
   def take_turn; end
 end
 
-class Creature < Thing
-  attr_accessor :tamer, :pets, :memory_map
-  attr_accessor :fov_map, :fov_range
-  attr_accessor :type, :template, :char, :color
-  attr_accessor :action_state
-  attr_accessor :hp, :max_hp
-
+module Mind
   STATE_IDLE = :idle
   STATE_MOVING = :moving
   STATE_FOLLOWING = :following
   STATE_ATTACKING = :attacking
+
+  def init_mind
+    @state = STATE_IDLE
+  end
+
+  def random_walk
+    move_to(@cell.adjacent.sample)
+  end
+
+  def start_following(target)
+    @path = nil
+    @state = STATE_FOLLOWING
+    @following = target
+  end
+
+  def take_turn
+    case @state
+    when STATE_IDLE
+      if @tamer
+        start_following(@tamer)
+        take_turn
+      else
+        random_walk
+      end
+
+    when STATE_FOLLOWING
+      unless walk_path
+        @path = path_to($player)
+        walk_path
+      end
+    when STATE_MOVING
+      unless walk_path
+        @state = STATE_FOLLOWING
+      end
+    when STATE_ATTACKING
+      if @cell.distance_to(@target) < 5
+        $log.write "#{name} damages #{@target.name} #{@target.hp}/#{@target.max_hp}"
+        @target.hp -= 1
+        if @target.hp == 0
+          @target.cell.contents.delete(@target)
+          @target = nil
+          @state = STATE_IDLE
+        end
+      else
+        @path = path_to(@target) unless walk_path
+      end
+    end
+  end
+end
+
+class Creature < Thing
+  attr_accessor :tamer, :pets, :memory_map
+  attr_accessor :fov_map, :fov_range
+  attr_accessor :type, :template, :char, :color
+  attr_accessor :state
+  attr_accessor :hp, :max_hp
+
+  include Mind
 
   def initialize(type)
     super()
@@ -421,10 +483,10 @@ class Creature < Thing
     @color = @template.color
     @fov_range = @template.fov_range
 
-    @action_state = STATE_IDLE
-
     @hp = 5
     @max_hp = 5
+
+    init_mind
   end
 
   def name # placeholder
@@ -488,38 +550,6 @@ class Creature < Thing
   end
 
   def take_pet_turn
-    return turn_burrowing if @burrowing
-
-    case @action_state
-    when STATE_IDLE
-      @action_state = STATE_FOLLOWING
-      take_pet_turn
-    when STATE_FOLLOWING
-      unless walk_path
-        @path = path_to($player)
-        walk_path
-      end
-    when STATE_MOVING
-      unless walk_path
-        @action_state = STATE_FOLLOWING
-      end
-    when STATE_ATTACKING
-      if @cell.distance_to(@target) < 5
-        $log.write "#{name} damages #{@target.name} #{@target.hp}/#{@target.max_hp}"
-        @target.hp -= 1
-        if @target.hp == 0
-          @target.cell.contents.delete(@target)
-          @target = nil
-          @action_state = STATE_IDLE
-        end
-      else
-        @path = path_to(@target) unless walk_path
-      end
-    end
-  end
-
-  def random_walk
-    move_to(@cell.adjacent.sample)
   end
 
   def can_see?(obj)
@@ -544,14 +574,6 @@ class Creature < Thing
     end
   end
 
-  def take_turn
-    if @tamer
-      take_pet_turn
-    else
-      take_wild_turn
-    end
-  end
-
   def path_to(target, burrow=false)
     if burrow
       $map.path_between(@cell, target) { 1.0 }
@@ -563,12 +585,12 @@ class Creature < Thing
   ### Orders
 
   def order_move(cell)
-    @action_state = STATE_MOVING
+    @state = STATE_MOVING
     @path = path_to(cell)
   end
 
   def order_attack(target)
-    @action_state = STATE_ATTACKING
+    @state = STATE_ATTACKING
     @target = target
   end
 
@@ -637,6 +659,8 @@ class Game
 
     enemy = Creature.new(:nommer)
     $map.some_passable_cell.put(enemy)
+
+    @effects = []
   end
   
   def change_map(new_map)
@@ -780,7 +804,9 @@ class MainGameUI
       end
     end
 
-
+    $game.effects.each do |effect|
+      effect.render(con)
+    end
 
     Console.blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0)
   end
@@ -793,7 +819,7 @@ class MainGameUI
       else
         sidebar += "#{i+1}. #{pet.type}\n"
       end
-      sidebar += pet.action_state.to_s + "\n"
+      sidebar += pet.state.to_s + "\n"
     end
     con.print_rect(0, 0, SCREEN_HEIGHT, 10, colorify(sidebar))
   end
@@ -815,8 +841,15 @@ class MainGameUI
     case key.c
     when 'b' then
       @burrowing = !@burrowing
+    when 'f' then
+      effect = Effect.new do |con| 
+        @pet.path_to($map[$mouse.cx][$mouse.cy]).each do |x, y|
+          con.set_char_background(x, y, TCOD::Color::RED)
+        end
+      end
+      $game.effects.push(effect)
     when "\r"
-      submit_order if @pet
+      submit_order
     end
   end
 
@@ -857,16 +890,22 @@ class MainGameUI
       $player.cell.contents.each do |obj|
         obj.activate if obj.is_a?(Staircase) && obj.dir == :up
       end
+    when '.'
+      $game.end_turn
     end
 
     if Console.key_pressed?(TCOD::KEY_UP)
       $player.move_to($player.cell.up)
+      $game.end_turn
     elsif Console.key_pressed?(TCOD::KEY_DOWN)
       $player.move_to($player.cell.down)
+      $game.end_turn
     elsif Console.key_pressed?(TCOD::KEY_LEFT)
       $player.move_to($player.cell.left)
+      $game.end_turn
     elsif Console.key_pressed?(TCOD::KEY_RIGHT)
       $player.move_to($player.cell.right)
+      $game.end_turn
     end
   end
 
@@ -884,8 +923,6 @@ class MainGameUI
       end
     when STATE_LOG then on_log_keypress(key)
     end
-
-    $game.end_turn
   end
 
   def submit_order
