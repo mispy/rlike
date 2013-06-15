@@ -418,8 +418,12 @@ module Mind
   STATE_FOLLOWING = :following
   STATE_ATTACKING = :attacking
 
+  attr_accessor :path # Path we are walking
+  attr_accessor :attacking # Target Creature for STATE_ATTACKING
+  attr_accessor :following # Target Creature for STATE_FOLLOWING
+
   def init_mind
-    @state = STATE_IDLE
+    @mind_state = STATE_IDLE
   end
 
   def random_walk
@@ -433,7 +437,7 @@ module Mind
   end
 
   def take_turn
-    case @state
+    case @mind_state
     when STATE_IDLE
       if (target = nearby_enemy)
         order_attack(target)
@@ -449,7 +453,7 @@ module Mind
       end
 
       unless walk_path
-        @path = path_to($player)
+        @path = path_to(@following)
         walk_path
       end
 
@@ -460,41 +464,46 @@ module Mind
       end
 
       unless walk_path
-        @state = STATE_FOLLOWING
+        @mind_state = STATE_IDLE
       end
 
     when STATE_ATTACKING
-      if @cell.distance_to(@target) < 5
-        $log.write "#{name} damages #{@target.name} #{@target.hp}/#{@target.max_hp}"
-        @target.hp -= 1
-        if @target.hp == 0
-          @target.cell.contents.delete(@target)
-          @target = nil
-          @state = STATE_IDLE
+      if @cell.distance_to(@attacking) < 5
+        $log.write "#{name} damages #{@attacking.name} #{@attacking.hp}/#{@attacking.max_hp}"
+        @attacking.hp -= 1
+        if @attacking.hp == 0
+          @attacking.cell.contents.delete(@attacking)
+          @attacking = nil
+          @mind_state = STATE_IDLE
         end
       else
-        @path = path_to(@target) unless walk_path
+        @path = path_to(@attacking) unless walk_path
       end
     end
+  end
+
+  def change_mind(state)
+    @path = nil
+    @following = nil
+    @attacking = nil
+    @mind_state = state
   end
 
   ### Orders
 
   def order_follow(target)
-    @path = nil
-    @state = STATE_FOLLOWING
+    change_mind(STATE_FOLLOWING)
     @following = target
   end
 
   def order_move(cell)
-    @state = STATE_MOVING
+    change_mind(STATE_MOVING)
     @path = path_to(cell)
   end
 
   def order_attack(target)
-    @path = nil
-    @state = STATE_ATTACKING
-    @target = target
+    change_mind(STATE_ATTACKING)
+    @attacking = target
   end
 
   def order_burrow(cell)
@@ -506,8 +515,8 @@ end
 class Creature < Thing
   attr_accessor :tamer, :pets, :memory_map
   attr_accessor :fov_map, :fov_range
-  attr_accessor :type, :template, :char, :color
-  attr_accessor :state
+  attr_accessor :type, :name, :template, :char, :color
+  attr_accessor :mind_state
   attr_accessor :hp, :max_hp
 
   include Mind
@@ -523,19 +532,15 @@ class Creature < Thing
     @fov_map = nil # TCOD data structure for pet/player FOV calcs.
 
     @type = type
+    @name = type.to_s
     @template = Species[@type]
     @char = @template.char
     @color = @template.color
     @fov_range = @template.fov_range
-
-    @hp = 5
-    @max_hp = 5
+    @max_hp = @template.base_hp
+    @hp = @template.base_hp
 
     init_mind
-  end
-
-  def name # placeholder
-    @type.to_s
   end
 
   # Willful (and therefore blockable) movement
@@ -602,7 +607,11 @@ class Creature < Thing
   end
 
   def dislikes?(obj)
-    obj.tamer != @tamer && obj != @tamer
+    if @tamer
+      obj.tamer != @tamer && obj != @tamer
+    else
+      obj == $player || obj.tamer == $player
+    end
   end
 
   def take_wild_turn
@@ -675,6 +684,7 @@ class Game
 
   def initialize
     $player = Player.new
+    $player.name = 'Mispy'
     burrower = Creature.new(:burrower)
     burrower.tamer = $player
     $player.pets.push(burrower)
@@ -743,6 +753,10 @@ class MainGameUI
   STATE_MAIN = :main
   STATE_LOG = :show_log
 
+  ORDER_MOVE = :move
+  ORDER_FOLLOW = :follow
+  ORDER_ATTACK = :attack
+
   def initialize
     @pet = nil # Selected pet
     @burrowing = false
@@ -804,32 +818,43 @@ class MainGameUI
     end
 
     if @pet
-      if @burrowing
-        path = @pet.path_to($map[$mouse.cx][$mouse.cy], true)
-        if path
-          path.each { |x, y| con.set_char_background(x, y, TCOD::Color::GREY) }
-        end
+      cell = $map[$mouse.cx][$mouse.cy]
+      if (target = cell.creatures.find { |cre| @pet.dislikes?(cre) })
+        @order = ORDER_ATTACK
+        @order_proc = proc { @pet.order_attack(target) }
+        order_desc = "{fg:red}Attack #{target.name}{stop}"
+        path_color = TCOD::Color::RED
+      elsif (friend = cell.creatures.find { |cre| !@pet.dislikes?(cre) })
+        @order = ORDER_FOLLOW
+        @order_proc = proc { @pet.order_follow(friend) }
+        order_desc = "{fg:light_blue}Follow #{friend.name}{stop}"
+        path_color = TCOD::Color::BLUE
       else
-        cell = $map[$mouse.cx][$mouse.cy]
-        path = @pet.path_to(cell)
-        if path
-          if cell.creatures.find { |cre| @pet.dislikes?(cre) }
-            color = TCOD::Color::RED
-          else
-            color = TCOD::Color::GREEN
-          end
-          path.each { |x, y| con.set_char_background(x, y, color) }
-        end
+        @order = ORDER_MOVE
+        @order_proc = proc { @pet.order_move(cell) }
+        order_desc = "{fg:green}Move here{stop}"
+        path_color = TCOD::Color::GREEN
       end
+
+      path = @pet.path_to(cell)
+      if path
+        path.each { |x, y| con.set_char_background(x, y, path_color) }
+      end
+    else
+      @order = nil
     end
 
     render_sidebar(con)
     $log.render(con, 0, SCREEN_HEIGHT-3, SCREEN_WIDTH, 3)
 
-    # Hover inspect
-    $map[$mouse.cx][$mouse.cy].contents.each do |obj|
-      if obj.is_a? Creature
-        con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, obj.name)
+    if order_desc
+      con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, colorify(order_desc))
+    else
+      # Hover inspect
+      $map[$mouse.cx][$mouse.cy].creatures.each do |cre|
+        text = "#{cre.name}\n#{describe_behavior(cre)}"
+        con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, colorify(text))
+        break
       end
     end
 
@@ -840,15 +865,29 @@ class MainGameUI
     Console.blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0)
   end
 
+  # Produce a string describing a Creature's current behavior
+  def describe_behavior(cre)
+    case cre.mind_state
+    when Mind::STATE_MOVING
+      "{fg:green}Moving to position{stop}"
+    when Mind::STATE_ATTACKING
+      "{fg:red}Attacking #{cre.attacking.name}{stop}"
+    when Mind::STATE_FOLLOWING
+      "{fg:light_blue}Following #{cre.following.name}{stop}"
+    when Mind::STATE_IDLE
+      "Idle"
+    end
+  end
+
   def render_sidebar(con)
-    sidebar = "Mispy\n"
+    sidebar = "#{$player.name}\n"
     $player.pets.each_with_index do |pet, i|
       if pet == @pet
-        sidebar += "{bg:white}{fg:black}#{i+1}. #{pet.type}{stop}\n"
+        sidebar += "{bg:white}{fg:black}[#{i+1}] #{pet.type}{stop}\n"
       else
-        sidebar += "#{i+1}. #{pet.type}\n"
+        sidebar += "[#{i+1}] #{pet.type}\n"
       end
-      sidebar += pet.state.to_s + "\n"
+      sidebar += describe_behavior(pet) + "\n"
     end
     con.print_rect(0, 0, SCREEN_HEIGHT, 10, colorify(sidebar))
   end
@@ -961,16 +1000,7 @@ class MainGameUI
   end
 
   def submit_order
-    if @burrowing
-      @pet.order_burrow($map[$mouse.cx][$mouse.cy])
-    else
-      cell = $map[$mouse.cx][$mouse.cy]
-      if (target = cell.creatures.find { |cre| @pet.dislikes?(cre) })
-        @pet.order_attack(target)
-      else
-        @pet.order_move($map[$mouse.cx][$mouse.cy])
-      end
-    end
+    @order_proc.call
     @pet = nil
   end
 
