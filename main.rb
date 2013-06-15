@@ -22,18 +22,10 @@ def debug(*args)
   puts args.map(&:to_s).join(' ')
 end
 
-module TCOD
-  class Color
-    def save
-      [self[:r], self[:g], self[:b]]
-    end
+module Boolean; end
+class TrueClass; include Boolean; end
+class FalseClass; include Boolean; end
 
-    def self.load(data)
-      Color.rgb(*data)
-    end
-  end
-end
- 
 class Bitfield
   # Just an array of booleans for now, but
   # here so it can be optimized later
@@ -53,35 +45,6 @@ class Bitfield
 
   def []=(x, y)
     @arr[x] = y
-  end
-
-  def save
-    @arr.to_a
-  end
-
-  def self.load(data)
-    field = Bitfield.new(data.length, data[0].length)
-    field.instance_eval {
-      @arr = data
-    }
-    field
-  end
-end
-
-class Template
-  attr_reader :label, :char, :color, :passable
-  def initialize(label, char, color, passable)
-    @label = label
-    @char = char
-    @color = color
-    @passable = passable
-
-    @@types ||= {}
-    @@types[@label] = self
-  end
-
-  def self.[](type)
-    @@types[type]
   end
 end
 
@@ -139,61 +102,107 @@ class Cell
   def right; $map[@x+1][@y]; end
 end
 
-class Terrain
-  attr_reader :label, :char, :color, :passable
-  def initialize(label, char, color, passable)
+class Template
+  class << self
+    attr_reader :fields # Where the layout specification is stored
+    attr_reader :instances # Instances by label
+
+    def layout(fields)
+      @fields = {}
+      fields.each do |field, type|
+        @fields[field] = type
+        attr_reader field
+      end
+
+      @instances = {}
+    end
+
+    def [](type)
+      @instances[type] or raise ArgumentError, "No such #{self.name}: #{type.inspect}"
+    end
+  end
+
+  attr_reader :label # Label for an instance of a template
+
+  def initialize(label, opts)
     @label = label
-    @char = char
-    @color = color
-    @passable = passable
+    self.class.fields.keys.each do |key|
+      unless opts.has_key?(key)
+        raise ArgumentError, "#{self.class.name} #{@label.inspect} is missing field: #{key}"
+      end
+    end
 
-    @@types ||= {}
-    @@types[@label] = self
+    opts.each do |key, val|
+      unless self.class.fields.has_key?(key)
+        raise ArgumentError, "Unknown field for #{self.class.name} #{@label.inspect}: #{key}"
+      end
+
+      unless val.is_a? self.class.fields[key]
+        raise ArgumentError, "Invalid type for #{key.inspect} of #{self.class.name} #{@label.inspect}: Expected #{self.class.fields[key].name}, received #{val.class.name}"
+      end
+
+      instance_variable_set("@#{key}", val)
+    end
+
+    self.class.instances[@label] = self
   end
 
-  def self.[](type)
-    @@types[type] or raise ArgumentError, "No such Terrain: #{type.inspect}"
-  end
+end
+
+class Terrain < Template
+  layout(
+    char: String,
+    color: TCOD::Color,
+    passable: Boolean
+  )
 end
 
 
-Terrain.new(:floor, ' ', TCOD::Color.rgb(77,60,41), true)
-Terrain.new(:wall, ' ', TCOD::Color::WHITE, false)
+Terrain.new(:floor, 
+  char: ' ', 
+  color: TCOD::Color.rgb(77,60,41), 
+  passable: true
+)
 
-class Species
-  attr_reader :label, :char, :color, :fov_range
-  def initialize(label, char, color, fov_range)
-    @label = label
-    @char = char
-    @color = color
-    @fov_range = fov_range
+Terrain.new(:wall, 
+  char: ' ', 
+  color: TCOD::Color::WHITE, 
+  passable: false
+)
 
-    @@types ||= {}
-    @@types[@label] = self
-  end
 
-  def self.[](type)
-    @@types[type] or raise ArgumentError, "No such Species: #{type.inspect}"
-  end
+class Species < Template
+  layout(
+    char: String,
+    color: TCOD::Color,
+    fov_range: Integer,
+    base_hp: Integer,
+  )
 end
 
-Species.new(:player, '@', TCOD::Color::WHITE, 8)
-Species.new(:burrower, 'b', TCOD::Color::GREY, 8)
-Species.new(:nommer, 'n', TCOD::Color::RED, 8)
+Species.new(:player, 
+  char: '@', 
+  color: TCOD::Color::WHITE, 
+  fov_range: 8,
+  base_hp: 10
+)
 
-class Ability
-  attr_reader :label
-  def initialize(label, opts={})
-    @label = label
-  end
+Species.new(:burrower, 
+  char: 'b', 
+  color: TCOD::Color::GREY, 
+  fov_range: 8,
+  base_hp: 10
+)
 
-  def self.[](type)
-    @@types[type] or raise ArgumentError, "No such Ability: #{type.inspect}"
-  end
-end
+Species.new(:nommer, 
+  char: 'n', 
+  color: TCOD::Color::RED, 
+  fov_range: 8,
+  base_hp: 5
+)
 
 class Effect
-  def new(&block)
+  def initialize(&block)
     @block = block
   end
 
@@ -417,31 +426,43 @@ module Mind
     move_to(@cell.adjacent.sample)
   end
 
-  def start_following(target)
-    @path = nil
-    @state = STATE_FOLLOWING
-    @following = target
+  def nearby_enemy
+    $map.creatures.find do |cre|
+      dislikes?(cre) && can_see?(cre)
+    end
   end
 
   def take_turn
     case @state
     when STATE_IDLE
-      if @tamer
-        start_following(@tamer)
-        take_turn
-      else
-        random_walk
+      if (target = nearby_enemy)
+        order_attack(target)
+        return take_turn
       end
 
+      random_walk
+
     when STATE_FOLLOWING
+      if (target = nearby_enemy)
+        order_attack(target)
+        return take_turn
+      end
+
       unless walk_path
         @path = path_to($player)
         walk_path
       end
+
     when STATE_MOVING
+      if (target = nearby_enemy)
+        order_attack(target)
+        return take_turn
+      end
+
       unless walk_path
         @state = STATE_FOLLOWING
       end
+
     when STATE_ATTACKING
       if @cell.distance_to(@target) < 5
         $log.write "#{name} damages #{@target.name} #{@target.hp}/#{@target.max_hp}"
@@ -455,6 +476,30 @@ module Mind
         @path = path_to(@target) unless walk_path
       end
     end
+  end
+
+  ### Orders
+
+  def order_follow(target)
+    @path = nil
+    @state = STATE_FOLLOWING
+    @following = target
+  end
+
+  def order_move(cell)
+    @state = STATE_MOVING
+    @path = path_to(cell)
+  end
+
+  def order_attack(target)
+    @path = nil
+    @state = STATE_ATTACKING
+    @target = target
+  end
+
+  def order_burrow(cell)
+    @burrowing = true
+    @path = path_to(cell, true)
   end
 end
 
@@ -582,23 +627,6 @@ class Creature < Thing
     end
   end
 
-  ### Orders
-
-  def order_move(cell)
-    @state = STATE_MOVING
-    @path = path_to(cell)
-  end
-
-  def order_attack(target)
-    @state = STATE_ATTACKING
-    @target = target
-  end
-
-  def order_burrow(cell)
-    @burrowing = true
-    @path = path_to(cell, true)
-  end
-
   ### Debug
   
   def to_s
@@ -643,13 +671,14 @@ end
 
 
 class Game
-  attr_accessor :log
+  attr_accessor :log, :effects
 
   def initialize
     $player = Player.new
     burrower = Creature.new(:burrower)
     burrower.tamer = $player
     $player.pets.push(burrower)
+    burrower.order_follow($player)
     change_map($mapgen.classic(SCREEN_WIDTH, SCREEN_HEIGHT))
     $map.upstair.put($player)
     $player.summon_pets
@@ -842,9 +871,15 @@ class MainGameUI
     when 'b' then
       @burrowing = !@burrowing
     when 'f' then
+      i = 0
       effect = Effect.new do |con| 
-        @pet.path_to($map[$mouse.cx][$mouse.cy]).each do |x, y|
-          con.set_char_background(x, y, TCOD::Color::RED)
+        path = @pet.path_to($map[$mouse.cx][$mouse.cy])
+        unless path.nil?
+          path.each do |x, y|
+            color = (i % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
+            con.set_char_background(x, y, color)
+            i += 1
+          end
         end
       end
       $game.effects.push(effect)
@@ -1015,7 +1050,7 @@ until Console.window_closed?
   TCOD.sys_check_for_event(TCOD::EVENT_KEY_PRESS | TCOD::EVENT_MOUSE, $key, $mouse)
 
   if $key.vk != TCOD::KEY_NONE
-    exit! if $key.vk == TCOD::KEY_ESCAPE
+    #exit! if $key.vk == TCOD::KEY_ESCAPE
     $ui.on_keypress($key)
   elsif $mouse.lbutton_pressed
     $ui.on_lclick
