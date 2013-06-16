@@ -173,6 +173,7 @@ Terrain.new(:wall,
 
 class Species < Template
   layout(
+    name: String,
     char: String,
     color: TCOD::Color,
     fov_range: Integer,
@@ -181,24 +182,66 @@ class Species < Template
 end
 
 Species.new(:player, 
+  name: 'Player',
   char: '@', 
   color: TCOD::Color::WHITE, 
   fov_range: 8,
   base_hp: 10
 )
 
-Species.new(:burrower, 
-  char: 'b', 
-  color: TCOD::Color::GREY, 
+Species.new(:pyromouse, 
+  name: 'Pyromouse',
+  char: 'r', 
+  color: TCOD::Color::RED, 
   fov_range: 8,
   base_hp: 10
 )
 
-Species.new(:nommer, 
-  char: 'n', 
-  color: TCOD::Color::RED, 
+Species.new(:gridbug, 
+  name: 'Gridbug',
+  char: 'x', 
+  color: TCOD::Color::PURPLE, 
   fov_range: 8,
   base_hp: 5
+)
+
+class Ability < Template
+  TARGET_SELF = :self
+  TARGET_LINE = :line
+
+  layout(
+    name: String, # Humanized ability name
+    key: String, # Key to invoke
+    target_style: Symbol, # How this ability is targeted
+    result: Proc
+  )
+
+  def invoke(source, cell)
+    @result.call(source, cell)
+  end
+end
+
+Ability.new(:firestream, 
+  name: "Fire Stream", 
+  key: 'f',
+  target_style: Ability::TARGET_LINE,
+  result: proc { |source, cell|
+    p cell
+    i = 0
+    effect = Effect.new do |con| 
+      j = i
+      path = source.path_to(cell)
+      unless path.nil?
+        path.each do |x, y|
+          color = (j % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
+          con.set_char_background(x, y, color)
+          j += 1
+        end
+      end
+      i += 1
+    end
+    $game.effects.push(effect)
+  }
 )
 
 class Effect
@@ -518,6 +561,7 @@ class Creature < Thing
   attr_accessor :type, :name, :template, :char, :color
   attr_accessor :mind_state
   attr_accessor :hp, :max_hp
+  attr_accessor :abilities
 
   include Mind
 
@@ -532,13 +576,15 @@ class Creature < Thing
     @fov_map = nil # TCOD data structure for pet/player FOV calcs.
 
     @type = type
-    @name = type.to_s
     @template = Species[@type]
+    @name = @template.name
     @char = @template.char
     @color = @template.color
     @fov_range = @template.fov_range
     @max_hp = @template.base_hp
     @hp = @template.base_hp
+
+    @abilities = []
 
     init_mind
   end
@@ -685,10 +731,11 @@ class Game
   def initialize
     $player = Player.new
     $player.name = 'Mispy'
-    burrower = Creature.new(:burrower)
-    burrower.tamer = $player
-    $player.pets.push(burrower)
-    burrower.order_follow($player)
+    pyromouse = Creature.new(:pyromouse)
+    pyromouse.abilities.push(Ability[:firestream])
+    pyromouse.tamer = $player
+    $player.pets.push(pyromouse)
+    pyromouse.order_follow($player)
     change_map($mapgen.classic(SCREEN_WIDTH, SCREEN_HEIGHT))
     $map.upstair.put($player)
     $player.summon_pets
@@ -696,7 +743,7 @@ class Game
     $log = MessageLog.new
     $log.messages.push("Hullo there!")
 
-    enemy = Creature.new(:nommer)
+    enemy = Creature.new(:gridbug)
     $map.some_passable_cell.put(enemy)
 
     @effects = []
@@ -719,7 +766,7 @@ class Game
     end
     
     if rand < 0.01 && $map.downstair.passable? && $map.creatures.length < MAX_MAP_CREATURES
-      $map.downstair.put(Creature.new(:nommer))
+      $map.downstair.put(Creature.new(:gridbug))
     end
   end
 end
@@ -751,7 +798,9 @@ end
 
 class MainGameUI
   STATE_MAIN = :main
-  STATE_LOG = :show_log
+  STATE_LOG = :show_log # Viewing the full message log
+  STATE_CHOOSE_ORDER = :choose_order # Pet selected
+  STATE_TARGET_ABILITY = :target_ability # Pet and ability selected
 
   ORDER_MOVE = :move
   ORDER_FOLLOW = :follow
@@ -779,10 +828,13 @@ class MainGameUI
     }
   end
 
-  def render_main
-    con = TCOD::Console.new($map.width, $map.height) # Temporary console
-    con.set_background_flag(TCOD::BKGND_SET)
+  def select_pet(pet)
+    @state = STATE_CHOOSE_ORDER
+    @pet = $player.pets[0]
+  end
 
+  # Render the visible structure and contents of the map
+  def render_map(con)
     $player.and_pets.each do |cre|
       cre.fov_map.compute_fov(cre.x, cre.y, cre.fov_range, true, 0)
     end
@@ -817,38 +869,91 @@ class MainGameUI
       end
     end
 
-    if @pet
-      cell = $map[$mouse.cx][$mouse.cy]
-      if (target = cell.creatures.find { |cre| @pet.dislikes?(cre) })
-        @order = ORDER_ATTACK
-        @order_proc = proc { @pet.order_attack(target) }
-        order_desc = "{fg:red}Attack #{target.name}{stop}"
-        path_color = TCOD::Color::RED
-      elsif (friend = cell.creatures.find { |cre| !@pet.dislikes?(cre) })
-        @order = ORDER_FOLLOW
-        @order_proc = proc { @pet.order_follow(friend) }
-        order_desc = "{fg:light_blue}Follow #{friend.name}{stop}"
-        path_color = TCOD::Color::BLUE
-      else
-        @order = ORDER_MOVE
-        @order_proc = proc { @pet.order_move(cell) }
-        order_desc = "{fg:green}Move here{stop}"
-        path_color = TCOD::Color::GREEN
-      end
+    # Miscellaneous visual effects
+    $game.effects.each do |effect|
+      effect.render(con)
+    end
+  end
 
-      path = @pet.path_to(cell)
-      if path
-        path.each { |x, y| con.set_char_background(x, y, path_color) }
+  # Render the pet status/selection sidebar
+  def render_sidebar(con)
+    if [STATE_CHOOSE_ORDER, STATE_TARGET_ABILITY].include?(@state)
+      sidebar = "{bg:white}{fg:black}[#{$player.pets.index(@pet)+1}] #{@pet.type}{stop}\n"
+      sidebar += "Awaiting orders\n"
+      @pet.abilities.each do |ability|
+        if @ability == ability
+          sidebar += "{bg:white}{fg:black}[#{ability.key}] #{ability.name}{stop}\n"
+        else
+          sidebar += "[#{ability.key}] #{ability.name}\n"
+        end
       end
     else
-      @order = nil
+      sidebar = "#{$player.name}\n"
+      $player.pets.each_with_index do |pet, i|
+        sidebar += "[#{i+1}] #{pet.name}\n"
+        sidebar += describe_behavior(pet) + "\n"
+      end
+    end
+
+    con.print_rect(0, 0, SCREEN_HEIGHT, 10, colorify(sidebar))
+  end
+
+  # Render the dynamic attack/move/follow order path
+  def render_order_path(con)
+    cell = $map[$mouse.cx][$mouse.cy]
+    if (target = cell.creatures.find { |cre| @pet.dislikes?(cre) })
+      @order = ORDER_ATTACK
+      @order_proc = proc { @pet.order_attack(target) }
+      @order_desc = "{fg:red}Attack #{target.name}{stop}"
+      path_color = TCOD::Color::RED
+    elsif (friend = cell.creatures.find { |cre| !@pet.dislikes?(cre) })
+      @order = ORDER_FOLLOW
+      @order_proc = proc { @pet.order_follow(friend) }
+      @order_desc = "{fg:light_blue}Follow #{friend.name}{stop}"
+      path_color = TCOD::Color::BLUE
+    else
+      @order = ORDER_MOVE
+      @order_proc = proc { @pet.order_move(cell) }
+      @order_desc = "{fg:green}Move here{stop}"
+      path_color = TCOD::Color::GREEN
+    end
+
+    path = @pet.path_to(cell)
+    if path
+      path.each { |x, y| con.set_char_background(x, y, path_color) }
+    end
+  end
+
+  # Render the targeting interface for an ability
+  def render_targeter(con)
+    cell = $map[$mouse.cx][$mouse.cy]
+
+    case @ability.target_style
+    when Ability::TARGET_LINE
+      path = @pet.path_to(cell)
+      if path
+        path.each { |x, y| con.set_char_background(x, y, TCOD::Color::RED) }
+      end
+    end
+  end
+
+  def render_main
+    con = TCOD::Console.new($map.width, $map.height) # Temporary console
+    con.set_background_flag(TCOD::BKGND_SET)
+
+    render_map(con)
+
+    if @state == STATE_CHOOSE_ORDER
+      render_order_path(con)
+    elsif @state == STATE_TARGET_ABILITY
+      render_targeter(con)
     end
 
     render_sidebar(con)
     $log.render(con, 0, SCREEN_HEIGHT-3, SCREEN_WIDTH, 3)
 
-    if order_desc
-      con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, colorify(order_desc))
+    if @order_desc
+      con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, colorify(@order_desc))
     else
       # Hover inspect
       $map[$mouse.cx][$mouse.cy].creatures.each do |cre|
@@ -856,10 +961,6 @@ class MainGameUI
         con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, colorify(text))
         break
       end
-    end
-
-    $game.effects.each do |effect|
-      effect.render(con)
     end
 
     Console.blit(con, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0)
@@ -879,19 +980,6 @@ class MainGameUI
     end
   end
 
-  def render_sidebar(con)
-    sidebar = "#{$player.name}\n"
-    $player.pets.each_with_index do |pet, i|
-      if pet == @pet
-        sidebar += "{bg:white}{fg:black}[#{i+1}] #{pet.type}{stop}\n"
-      else
-        sidebar += "[#{i+1}] #{pet.type}\n"
-      end
-      sidebar += describe_behavior(pet) + "\n"
-    end
-    con.print_rect(0, 0, SCREEN_HEIGHT, 10, colorify(sidebar))
-  end
-
   def render_log
     $log.render(Console, 0, 0, SCREEN_HEIGHT, SCREEN_WIDTH)
   end
@@ -899,6 +987,8 @@ class MainGameUI
   def render
     case @state
     when STATE_MAIN then render_main
+    when STATE_CHOOSE_ORDER then render_main
+    when STATE_TARGET_ABILITY then render_main
     when STATE_LOG then render_log
     end
   end
@@ -906,22 +996,18 @@ class MainGameUI
   # Handle keypress in state where a pet has been previously
   # assigned to @pet
   def on_pet_keypress(key)
+    p key.c
     case key.c
-    when 'b' then
-      @burrowing = !@burrowing
-    when 'f' then
-      i = 0
-      effect = Effect.new do |con| 
-        path = @pet.path_to($map[$mouse.cx][$mouse.cy])
-        unless path.nil?
-          path.each do |x, y|
-            color = (i % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
-            con.set_char_background(x, y, color)
-            i += 1
-          end
+    when ('a'..'z') then
+      p '???'
+      @pet.abilities.each do |ability|
+        if ability.key == key.c
+          @ability = ability
+          @state = STATE_TARGET_ABILITY
         end
       end
-      $game.effects.push(effect)
+    when 'b' then
+      @burrowing = !@burrowing
     when "\r"
       submit_order
     end
@@ -949,9 +1035,10 @@ class MainGameUI
     case key.c
     when '1' then
       if @pet
+        @state = STATE_MAIN
         @pet = nil
       else
-        @pet = $player.pets[0]
+        select_pet($player.pets[0])
       end
     when 'L' then
       @state = STATE_LOG
@@ -990,11 +1077,9 @@ class MainGameUI
   def on_keypress(key)
     case @state
     when STATE_MAIN
-      if @pet
-        on_pet_keypress(key)
-      else
-        on_main_keypress(key)
-      end
+      on_main_keypress(key)
+    when STATE_CHOOSE_ORDER
+      on_pet_keypress(key)
     when STATE_LOG then on_log_keypress(key)
     end
   end
@@ -1002,17 +1087,27 @@ class MainGameUI
   def submit_order
     @order_proc.call
     @pet = nil
+    @state = STATE_MAIN
   end
 
   def on_lclick
-    if @pet
-      submit_order
-    else
-      $map[$mouse.cx][$mouse.cy].contents.each do |obj|
-        if obj.tamer == $player
-          @pet = obj
+    cell = $map[$mouse.cx][$mouse.cy]
+
+    case @state
+    when STATE_MAIN
+      # Select a pet
+      cell.creatures.each do |cre|
+        if cre.tamer == $player
+          select_pet(cre)
+          break
         end
       end
+    when STATE_CHOOSE_ORDER
+      submit_order if @order
+    when STATE_TARGET_ABILITY
+      @ability.invoke(@pet, cell)
+      @pet = nil
+      @state = STATE_MAIN
     end
   end
 end
