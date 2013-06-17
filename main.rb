@@ -26,6 +26,22 @@ module Boolean; end
 class TrueClass; include Boolean; end
 class FalseClass; include Boolean; end
 
+def render_color(color)
+  [:r, :g, :b].map { |c| [color[c]+1, 255].min.chr }.join
+end
+
+def colorify(s)
+  s = s.gsub('{stop}', TCOD::COLCTRL_STOP.chr)
+  s = s.gsub(/{bg:(.+?)}/) { |match|
+    color = TCOD::Color.const_get(match.gsub('{bg:', '').gsub('}', '').upcase)
+    "#{TCOD::COLCTRL_BACK_RGB.chr}#{render_color(color)}"
+  }
+  s = s.gsub(/{fg:(.+?)}/) { |match|
+    color = TCOD::Color.const_get(match.gsub('{fg:', '').gsub('}', '').upcase)
+    "#{TCOD::COLCTRL_FORE_RGB.chr}#{render_color(color)}"
+  }
+end
+
 class Bitfield
   # Just an array of booleans for now, but
   # here so it can be optimized later
@@ -217,6 +233,7 @@ class Ability < Template
   )
 
   def invoke(source, cell)
+    @source = source
     @result.call(source, cell)
   end
 end
@@ -225,32 +242,45 @@ Ability.new(:firestream,
   name: "Fire Stream", 
   key: 'f',
   target_style: Ability::TARGET_LINE,
-  result: proc { |source, cell|
-    p cell
+  result: proc { |user, target|
+    path = user.path_to(target)
+
     i = 0
-    effect = Effect.new do |con| 
+    visual = Visual.new do |con| 
       j = i
-      path = source.path_to(cell)
-      unless path.nil?
-        path.each do |x, y|
-          color = (j % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
-          con.set_char_background(x, y, color)
-          j += 1
-        end
+      path.each do |x, y|
+        color = (j % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
+        con.set_char_background(x, y, color)
+        j += 1
       end
       i += 1
+
+      end_visual if i >= 4
     end
-    $game.effects.push(effect)
+
+    $game.effects.push(visual)
+
+    path.each do |x, y|
+      $map[x][y].creatures.each do |cre|
+        color = $player.likes?(cre) ? 'red' : 'green'
+        $log.write("{fg:#{color}}#{cre.name} takes 5 damage from #{user.name}'s Fire Stream{stop}")
+        cre.take_damage(5, user)
+      end
+    end
   }
 )
 
-class Effect
+class Visual
   def initialize(&block)
     @block = block
   end
 
   def render(con)
-    @block.call(con)
+    self.instance_exec(con, &@block)
+  end
+
+  def end_visual
+    $game.effects.delete(self)
   end
 end
 
@@ -513,12 +543,7 @@ module Mind
     when STATE_ATTACKING
       if @cell.distance_to(@attacking) < 5
         $log.write "#{name} damages #{@attacking.name} #{@attacking.hp}/#{@attacking.max_hp}"
-        @attacking.hp -= 1
-        if @attacking.hp == 0
-          @attacking.cell.contents.delete(@attacking)
-          @attacking = nil
-          @mind_state = STATE_IDLE
-        end
+        @attacking.take_damage(1, self)
       else
         @path = path_to(@attacking) unless walk_path
       end
@@ -652,12 +677,16 @@ class Creature < Thing
     @cell.distance_to(obj) < @fov_range
   end
 
-  def dislikes?(obj)
-    if @tamer
-      obj.tamer != @tamer && obj != @tamer
+  def likes?(obj)
+    if $player.and_pets.include?(self)
+      $player.and_pets.include?(obj)
     else
-      obj == $player || obj.tamer == $player
+      !$player.and_pets.include?(obj)
     end
+  end
+
+  def dislikes?(obj)
+    !likes?(obj)
   end
 
   def take_wild_turn
@@ -679,6 +708,27 @@ class Creature < Thing
       $map.path_between(@cell, target) { 1.0 }
     else
       $map.path_between(@cell, target)
+    end
+  end
+
+  def take_damage(amount, source)
+    @hp -= amount
+    if @hp <= 0
+      color = $player.likes?(self) ? 'red' : 'green'
+      $log.write("{fg:#{color}}#{name} is defeated!{stop}")
+      @cell.contents.delete(self)
+
+      $map.creatures.each do |cre|
+        if cre.attacking == self
+          cre.attacking = nil
+          cre.mind_state = Mind::STATE_IDLE
+        end
+
+        if cre.following == self
+          cre.following = nil
+          cre.mind_state = Mind::STATE_IDLE
+        end
+      end
     end
   end
 
@@ -788,7 +838,7 @@ class MessageLog
     start = [0, @messages.length-height].max
 
     @messages.from(start).each_with_index do |msg, i|
-      con.print_rect(0, i, width, height, msg)
+      con.print_rect(0, i, width, height, colorify(msg))
     end
 
     console.blit(con, 0, 0, width, height, x, y)
@@ -810,22 +860,6 @@ class MainGameUI
     @pet = nil # Selected pet
     @burrowing = false
     @state = STATE_MAIN
-  end
-
-  def render_color(color)
-    [:r, :g, :b].map { |c| [color[c]+1, 255].min.chr }.join
-  end
-
-  def colorify(s)
-    s = s.gsub('{stop}', TCOD::COLCTRL_STOP.chr)
-    s = s.gsub(/{bg:(.+?)}/) { |match|
-      color = TCOD::Color.const_get(match.gsub('{bg:', '').gsub('}', '').upcase)
-      "#{TCOD::COLCTRL_BACK_RGB.chr}#{render_color(color)}"
-    }
-    s = s.gsub(/{fg:(.+?)}/) { |match|
-      color = TCOD::Color.const_get(match.gsub('{fg:', '').gsub('}', '').upcase)
-      "#{TCOD::COLCTRL_FORE_RGB.chr}#{render_color(color)}"
-    }
   end
 
   def select_pet(pet)
@@ -878,7 +912,7 @@ class MainGameUI
   # Render the pet status/selection sidebar
   def render_sidebar(con)
     if [STATE_CHOOSE_ORDER, STATE_TARGET_ABILITY].include?(@state)
-      sidebar = "{bg:white}{fg:black}[#{$player.pets.index(@pet)+1}] #{@pet.type}{stop}\n"
+      sidebar = "{bg:white}{fg:black}[#{$player.pets.index(@pet)+1}] #{@pet.name}{stop}\n"
       sidebar += "Awaiting orders\n"
       @pet.abilities.each do |ability|
         if @ability == ability
@@ -952,7 +986,7 @@ class MainGameUI
     render_sidebar(con)
     $log.render(con, 0, SCREEN_HEIGHT-3, SCREEN_WIDTH, 3)
 
-    if @order_desc
+    if @state == STATE_CHOOSE_ORDER
       con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, colorify(@order_desc))
     else
       # Hover inspect
@@ -1169,15 +1203,19 @@ $key = TCOD::Key.new
 $mouse = TCOD::Mouse.new
 
 until Console.window_closed?
-  $ui.render
-  Console.flush
+  begin
+    $ui.render
+    Console.flush
 
-  TCOD.sys_check_for_event(TCOD::EVENT_KEY_PRESS | TCOD::EVENT_MOUSE, $key, $mouse)
+    TCOD.sys_check_for_event(TCOD::EVENT_KEY_PRESS | TCOD::EVENT_MOUSE, $key, $mouse)
 
-  if $key.vk != TCOD::KEY_NONE
-    #exit! if $key.vk == TCOD::KEY_ESCAPE
-    $ui.on_keypress($key)
-  elsif $mouse.lbutton_pressed
-    $ui.on_lclick
+    if $key.vk != TCOD::KEY_NONE
+      #exit! if $key.vk == TCOD::KEY_ESCAPE
+      $ui.on_keypress($key)
+    elsif $mouse.lbutton_pressed
+      $ui.on_lclick
+    end
+  rescue Exception => e
+    debug("#{$@}\n#{$!}")
   end
 end
