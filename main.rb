@@ -9,8 +9,8 @@ $debug = true
 $debug_fov = false
 
 #actual size of the window
-SCREEN_WIDTH = 80
-SCREEN_HEIGHT = 50
+SCREEN_WIDTH = 100
+SCREEN_HEIGHT = 80
  
 LIMIT_FPS = 20  #20 frames-per-second maximum
 
@@ -285,12 +285,14 @@ class Visual
 end
 
 class Rect
-  attr_accessor :x1, :y1, :x2, :y2
+  attr_accessor :x1, :y1, :x2, :y2, :w, :h
   def initialize (x, y, w, h)
     @x1 = x
     @y1 = y
     @x2 = x + w
     @y2 = y + h
+    @w = w
+    @h = h
   end
 
   def center
@@ -299,9 +301,23 @@ class Rect
     [center_x, center_y]
   end
 
+  def size
+    @w*@h
+  end
+
   def intersect (other)
     return (@x1 <= other.x2 and @x2 >= other.x1 and
       @y1 <= other.y2 and @y2 >= other.y1)
+  end
+
+  def split_vertical(h)
+    [Rect.new(@x1, @y1, @w, h),
+     Rect.new(@x1, @y1+h+1, @w, @h-h-1)]
+  end
+
+  def split_horizontal(w)
+    [Rect.new(@x1, @y1, w, @h),
+     Rect.new(@x1+w+1, @y1, @w-w-1, @h)]
   end
 end
 
@@ -388,6 +404,56 @@ class Mapgen
 
       rooms.push(new_room)
       prev_x, prev_y = new_x, new_y
+    end
+
+    paint_stairs
+    @map
+  end
+
+  def bsp(width, height)
+    @map = solid_base(width, height)
+
+    rooms = [Rect.new(0, 0, width, height)]
+
+    while true
+      new_rooms = []
+      split = false
+      rooms.each do |room|
+        if room.size <= 40
+          new_rooms.push(room)
+        else
+          split = true
+          if room.w > room.h
+            w = [[(rand*room.w).floor, 3].max, room.w-3].min
+            new_rooms += room.split_horizontal(w)
+          else
+            h = [[(rand*room.w).floor, 3].max, room.h-3].min
+            new_rooms += room.split_vertical(h)
+          end
+        end
+      end
+      break unless split
+      rooms = new_rooms
+    end
+
+    prev_room = nil
+    rooms.each do |room|
+      paint_room(room)
+
+      if prev_room
+        new_x, new_y = room.center
+        prev_x, prev_y = prev_room.center
+
+        if rand < 0.5
+          paint_htunnel(prev_x, new_x, prev_y)
+          paint_vtunnel(prev_y, new_y, new_x)
+        else
+          paint_vtunnel(prev_y, new_y, prev_x)
+          paint_htunnel(prev_x, new_x, new_y)
+        end
+      end
+
+      prev_room = room
     end
 
     paint_stairs
@@ -766,7 +832,7 @@ class Staircase < Thing
   end
 
   def activate
-    $game.change_map($mapgen.classic(SCREEN_WIDTH, SCREEN_HEIGHT))
+    $game.change_map($mapgen.bsp(SCREEN_WIDTH, SCREEN_HEIGHT))
     opposite = (@dir == :down ? :up : :down)
     cell = $map.cells.find { |c| c.contents.find { |obj| obj.is_a?(Staircase) && obj.dir == opposite } }
     cell.put($player)
@@ -786,7 +852,7 @@ class Game
     pyromouse.tamer = $player
     $player.pets.push(pyromouse)
     pyromouse.order_follow($player)
-    change_map($mapgen.classic(SCREEN_WIDTH, SCREEN_HEIGHT))
+    change_map($mapgen.bsp(SCREEN_WIDTH, SCREEN_HEIGHT))
     $map.upstair.put($player)
     $player.summon_pets
 
@@ -897,6 +963,7 @@ class MainGameUI
           con.put_char_ex(cell.x, cell.y, obj.char, obj.color, terrain.color)
         end
       elsif remembered
+        obj = cell.contents.find { |o| !o.is_a? Creature } || cell.terrain
         con.put_char_ex(cell.x, cell.y, obj.char, obj.color * 0.5, terrain.color * 0.5)
       else
         con.put_char(cell.x, cell.y, ' ', TCOD::BKGND_NONE)
