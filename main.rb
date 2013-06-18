@@ -10,7 +10,7 @@ $debug_fov = false
 
 #actual size of the window
 SCREEN_WIDTH = 100
-SCREEN_HEIGHT = 80
+SCREEN_HEIGHT = 60
  
 LIMIT_FPS = 20  #20 frames-per-second maximum
 
@@ -71,7 +71,7 @@ class Cell
   def initialize(x, y, terrain)
     @x = x
     @y = y
-    @terrain = terrain # Basic terrain: wall or floor etc
+    @terrain = Terrain[terrain] # Basic terrain: wall or floor etc
     @contents = [] # Containing objects
   end
 
@@ -201,7 +201,7 @@ Species.new(:player,
   name: 'Player',
   char: '@', 
   color: TCOD::Color::WHITE, 
-  fov_range: 8,
+  fov_range: 20,
   base_hp: 10
 )
 
@@ -284,21 +284,29 @@ class Visual
   end
 end
 
-class Rect
-  attr_accessor :x1, :y1, :x2, :y2, :w, :h
-  def initialize (x, y, w, h)
+# Represents a rectangular subdivision of a map
+# Used for binary space partitioning
+class Div
+  attr_reader :x1, :y1, :x2, :y2, :w, :h, :cx, :cy
+  def initialize (map, x, y, w, h)
+    @map = map
     @x1 = x
     @y1 = y
     @x2 = x + w
     @y2 = y + h
     @w = w
     @h = h
+    @cx = ((@x1 + @x2) / 2).floor
+    @cy = ((@y1 + @y2) / 2).floor
+
+    if @x1 <= 0 || @y1 <= 0 || @x2 >= @map.width || @y2 >= @map.height
+      debug @map.width, @map.height
+      raise ArgumentError, "Subdivision exceeds map bounds: #{@x1} #{@y1} #{@x2} #{@y2}"
+    end
   end
 
-  def center
-    center_x = (@x1 + @x2) / 2
-    center_y = (@y1 + @y2) / 2
-    [center_x, center_y]
+  def [](x)
+    @map[@x1+x][@y1..@y2]
   end
 
   def size
@@ -311,13 +319,65 @@ class Rect
   end
 
   def split_vertical(h)
-    [Rect.new(@x1, @y1, @w, h),
-     Rect.new(@x1, @y1+h+1, @w, @h-h-1)]
+    [Div.new(@map, @x1, @y1, @w, h),
+     Div.new(@map, @x1, @y1+h+1, @w, @h-h-1)]
   end
 
   def split_horizontal(w)
-    [Rect.new(@x1, @y1, w, @h),
-     Rect.new(@x1+w+1, @y1, @w-w-1, @h)]
+    [Div.new(@map, @x1, @y1, w, @h),
+     Div.new(@map, @x1+w+1, @y1, @w-w-1, @h)]
+  end
+
+  def subdiv(x, y, w, h)
+    Div.new(@map, @x1+x, @y1+y, w, h)
+  end
+
+  def fill(terrain)
+    (0 ... @w).each do |x|
+      (0 ... @h).each do |y|
+        self[x][y].terrain = Terrain[terrain]
+      end
+    end
+  end
+
+  def paint_room
+    w = [rand(@w-2), 3].max
+    h = [rand(@h-2), 3].max
+    x1 = 1+rand(@w-w)
+    y1 = 1+rand(@h-h)
+
+    subdiv(x1, y1, w, h).fill(:floor)
+  end
+
+  def paint_oval
+    center = @map[@cx][@cy]
+    rh = @h/2
+    rw = @w/2
+    cells.each do |cell|
+      if rw < rh
+        if (cell.x - @cx).abs < rw && cell.distance_to(center) < rh
+          cell.terrain = Terrain[:floor]
+        end
+      else
+        if (cell.y - @cy).abs < rh && cell.distance_to(center) < rw
+          cell.terrain = Terrain[:floor]
+        end
+      end
+    end
+  end
+
+  def cells(&b)
+    Enumerator.new do |ys|
+      (0 ... @w).each do |x|
+        self[x].each do |cell|
+          ys << cell
+        end
+      end
+    end
+  end
+
+  def some_passable_cell
+    cells.find_all { |cell| cell.passable? }.sample
   end
 end
 
@@ -334,19 +394,11 @@ class Mapgen
       0.upto(width-1) do |x|
         @cellmap.push([])
         0.upto(height-1) do |y|
-          @cellmap[x].push(Cell.new(x, y, Terrain[:wall]))
+          @cellmap[x].push(Cell.new(x, y, :wall))
         end
       end
     end
     map
-  end
-
-  def paint_room(room)
-    (room.x1 ... room.x2).each do |x|
-      (room.y1 ... room.y2).each do |y|
-        @map[x][y].terrain = Terrain[:floor]
-      end
-    end
   end
 
   def paint_htunnel(x1, x2, y)
@@ -410,32 +462,67 @@ class Mapgen
     @map
   end
 
-  def bsp(width, height)
-    @map = solid_base(width, height)
-
-    rooms = [Rect.new(0, 0, width, height)]
+  def partition_map
+    divs = [Div.new(@map, 1, 1, @map.width-2, @map.height-2)]
 
     while true
-      new_rooms = []
+      new_divs = []
       split = false
-      rooms.each do |room|
-        if room.size <= 40
-          new_rooms.push(room)
+      divs.each do |div|
+        if div.size <= 300
+          new_divs.push(div)
         else
           split = true
-          if room.w > room.h
-            w = [[(rand*room.w).floor, 3].max, room.w-3].min
-            new_rooms += room.split_horizontal(w)
+          if div.w > div.h
+            w = [[rand(div.w), 6].max, div.w-6].min
+            new_divs += div.split_horizontal(w)
           else
-            h = [[(rand*room.w).floor, 3].max, room.h-3].min
-            new_rooms += room.split_vertical(h)
+            h = [[rand(div.w), 6].max, div.h-6].min
+            new_divs += div.split_vertical(h)
           end
         end
       end
       break unless split
-      rooms = new_rooms
+      divs = new_divs
     end
 
+    divs
+  end
+
+  def paint_path(path, terrain)
+    path.each do |x, y|
+      @map[x][y].terrain = Terrain[terrain]
+    end
+  end
+
+  def paint_tunnel(x1, y1, x2, y2)
+    if rand < 0.5
+      paint_htunnel(x1, x2, y1)
+      paint_vtunnel(y1, y2, x2)
+    else
+      paint_vtunnel(y1, y2, x1)
+      paint_htunnel(x1, x2, y2)
+    end
+  end
+
+  def bsp(width, height)
+    @map = solid_base(width, height)
+
+    divs = partition_map
+
+    divs.each do |div|
+      div.paint_oval
+    end
+
+    last_div = divs[0]
+    divs[1..-1].each do |div|
+      c1 = last_div.some_passable_cell
+      c2 = div.some_passable_cell
+      paint_tunnel(c1.x, c1.y, c2.x, c2.y)
+      last_div = div
+    end
+
+=begin
     prev_room = nil
     rooms.each do |room|
       paint_room(room)
@@ -455,6 +542,7 @@ class Mapgen
 
       prev_room = room
     end
+=end
 
     paint_stairs
     @map
@@ -1283,6 +1371,7 @@ until Console.window_closed?
       $ui.on_lclick
     end
   rescue Exception => e
-    debug("#{$@}\n#{$!}")
+    debug $!.inspect
+    debug e.backtrace.join("\n\t")
   end
 end
