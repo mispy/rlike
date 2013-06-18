@@ -116,6 +116,12 @@ class Cell
   def down; $map[@x][@y+1]; end
   def left; $map[@x-1][@y]; end
   def right; $map[@x+1][@y]; end
+
+  def burn
+    if @terrain.is(Terrain::FLAG_FLAMMABLE)
+      @terrain = Terrain[:floor]
+    end
+  end
 end
 
 class Template
@@ -166,23 +172,58 @@ class Template
 end
 
 class Terrain < Template
+  FLAG_FLAMMABLE = :flammable
+
   layout(
+    name: String,
     char: String,
     color: TCOD::Color,
-    passable: Boolean
+    bg_color: TCOD::Color,
+    passable: Boolean,
+    flags: Array
   )
+
+  def initialize(label, opts)
+    opts[:flags] ||= []
+    super
+  end
+
+  def is(flag)
+    @flags.include?(flag)
+  end
 end
 
-
-Terrain.new(:floor, 
-  char: ' ', 
-  color: TCOD::Color.rgb(77,60,41), 
+Terrain.new(:floor,
+  name: "Floor",
+  char: '.',
+  color: TCOD::Color::WHITE,
+  bg_color: TCOD::Color::BLACK,
   passable: true
 )
 
+
+Terrain.new(:grass, 
+  name: "Grass",
+  char: '.', 
+  color: TCOD::Color::DARK_GREEN,#TCOD::Color.rgb(77,60,41), 
+  bg_color: TCOD::Color::BLACK,
+  passable: true,
+  flags: [Terrain::FLAG_FLAMMABLE]
+)
+
 Terrain.new(:wall, 
-  char: ' ', 
+  name: "Wall",
+  char: '#', 
   color: TCOD::Color::WHITE, 
+  bg_color: TCOD::Color::BLACK,
+  passable: false
+)
+
+Terrain.new(:rock,
+  name: "Rock",
+  char: ' ',
+  color: TCOD::Color::BLACK,
+  bg_color: TCOD::Color::BLACK,
   passable: false
 )
 
@@ -266,6 +307,7 @@ Ability.new(:firestream,
         $log.write("{fg:#{color}}#{cre.name} takes 5 damage from #{user.name}'s Fire Stream{stop}")
         cre.take_damage(5, user)
       end
+      $map[x][y].burn
     end
   }
 )
@@ -346,7 +388,7 @@ class Div
     x1 = 1+rand(@w-w)
     y1 = 1+rand(@h-h)
 
-    subdiv(x1, y1, w, h).fill(:floor)
+    subdiv(x1, y1, w, h).fill(:grass)
   end
 
   def paint_oval
@@ -356,11 +398,11 @@ class Div
     cells.each do |cell|
       if rw < rh
         if (cell.x - @cx).abs < rw && cell.distance_to(center) < rh
-          cell.terrain = Terrain[:floor]
+          cell.terrain = Terrain[:grass]
         end
       else
         if (cell.y - @cy).abs < rh && cell.distance_to(center) < rw
-          cell.terrain = Terrain[:floor]
+          cell.terrain = Terrain[:grass]
         end
       end
     end
@@ -403,13 +445,13 @@ class Mapgen
 
   def paint_htunnel(x1, x2, y)
     ([x1,x2].min .. [x1,x2].max).each do |x|
-      @map[x][y].terrain = Terrain[:floor]
+      @map[x][y].terrain = Terrain[:grass]
     end
   end
 
   def paint_vtunnel(y1, y2, x)
     ([y1,y2].min .. [y1,y2].max).each do |y|
-      @map[x][y].terrain = Terrain[:floor]
+      @map[x][y].terrain = Terrain[:grass]
     end
   end
 
@@ -800,7 +842,7 @@ class Creature < Thing
 
   def burrow(x, y)
     target = $map[x][y]
-    target.terrain = Terrain[:floor]
+    target.terrain = Terrain[:grass]
     target.put(self)
   end
 
@@ -1048,11 +1090,11 @@ class MainGameUI
         if obj == @pet || (cell.x == $mouse.cx && cell.y == $mouse.cy)
           con.put_char_ex(cell.x, cell.y, obj.char, obj.color, TCOD::Color::WHITE)
         else
-          con.put_char_ex(cell.x, cell.y, obj.char, obj.color, terrain.color)
+          con.put_char_ex(cell.x, cell.y, obj.char, obj.color, terrain.bg_color)
         end
       elsif remembered
         obj = cell.contents.find { |o| !o.is_a? Creature } || cell.terrain
-        con.put_char_ex(cell.x, cell.y, obj.char, obj.color * 0.5, terrain.color * 0.5)
+        con.put_char_ex(cell.x, cell.y, obj.char, obj.color * 0.5, terrain.bg_color * 0.5)
       else
         con.put_char(cell.x, cell.y, ' ', TCOD::BKGND_NONE)
       end
@@ -1145,10 +1187,16 @@ class MainGameUI
       con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, colorify(@order_desc))
     else
       # Hover inspect
-      $map[$mouse.cx][$mouse.cy].creatures.each do |cre|
-        text = "#{cre.name}\n#{describe_behavior(cre)}"
-        con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, colorify(text))
-        break
+      cell = $map[$mouse.cx][$mouse.cy]
+      if cell.creatures.empty?
+        con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, 
+                     cell.terrain.name)
+      else
+        cell.creatures.each do |cre|
+          text = "#{cre.name}\n#{describe_behavior(cre)}"
+          con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, colorify(text))
+          break
+        end
       end
     end
 
@@ -1365,7 +1413,7 @@ until Console.window_closed?
     TCOD.sys_check_for_event(TCOD::EVENT_KEY_PRESS | TCOD::EVENT_MOUSE, $key, $mouse)
 
     if $key.vk != TCOD::KEY_NONE
-      #exit! if $key.vk == TCOD::KEY_ESCAPE
+      exit! if $key.lctrl && $key.c == 'c'
       $ui.on_keypress($key)
     elsif $mouse.lbutton_pressed
       $ui.on_lclick
