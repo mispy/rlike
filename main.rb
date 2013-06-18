@@ -235,7 +235,13 @@ class Species < Template
     color: TCOD::Color,
     fov_range: Integer,
     base_hp: Integer,
+    biomes: Array, 
   )
+
+  def initialize(label, opts)
+    opts[:biomes] ||= []
+    super
+  end
 end
 
 Species.new(:player, 
@@ -265,6 +271,7 @@ Species.new(:gridbug,
 class Ability < Template
   TARGET_SELF = :self
   TARGET_LINE = :line
+  TARGET_WAVE = :wave
 
   layout(
     name: String, # Humanized ability name
@@ -284,12 +291,12 @@ Ability.new(:firestream,
   key: 'f',
   target_style: Ability::TARGET_LINE,
   result: proc { |user, target|
-    path = user.path_to(target)
+    line = $map.line_between(user,target)
 
     i = 0
     visual = Visual.new do |con| 
       j = i
-      path.each do |x, y|
+      line.each do |x, y|
         color = (j % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
         con.set_char_background(x, y, color)
         j += 1
@@ -301,13 +308,46 @@ Ability.new(:firestream,
 
     $game.effects.push(visual)
 
-    path.each do |x, y|
+    line.each do |x, y|
       $map[x][y].creatures.each do |cre|
         color = $player.likes?(cre) ? 'red' : 'green'
         $log.write("{fg:#{color}}#{cre.name} takes 5 damage from #{user.name}'s Fire Stream{stop}")
         cre.take_damage(5, user)
       end
       $map[x][y].burn
+    end
+  }
+)
+
+Ability.new(:firewave,
+  name: "Fire Wave",
+  key: 'w',
+  target_style: Ability::TARGET_WAVE,
+  result: proc { |user, target|
+    wave = $map.wave_between(user,target)
+
+    i = 0
+    visual = Visual.new do |con| 
+      j = i
+      wave.each do |cell|
+        color = (j % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
+        con.set_char_background(cell.x, cell.y, color)
+        j += 1
+      end
+      i += 1
+
+      end_visual if i >= 4
+    end
+
+    $game.effects.push(visual)
+
+    wave.each do |cell|
+      cell.creatures.each do |cre|
+        color = $player.likes?(cre) ? 'red' : 'green'
+        $log.write("{fg:#{color}}#{cre.name} takes 5 damage from #{user.name}'s Fire Wave{stop}")
+        cre.take_damage(5, user)
+      end
+      cell.burn
     end
   }
 )
@@ -507,7 +547,7 @@ class Mapgen
   def partition_map
     divs = [Div.new(@map, 1, 1, @map.width-2, @map.height-2)]
 
-    while true
+    loop do
       new_divs = []
       split = false
       divs.each do |div|
@@ -628,8 +668,58 @@ class Map
     end
   end
 
+  # Bresenham's line algorithm
+  # http://en.wikipedia.org/wiki/Bresenham's_line_algorithm
+  def line_between(cell1, cell2)
+    x0, y0, x1, y1 = cell1.x, cell1.y, cell2.x, cell2.y
+    dx = (x1-x0).abs
+    dy = (y1-y0).abs
+    sx = (x0 < x1 ? 1 : -1)
+    sy = (y0 < y1 ? 1 : -1)
+    err = dx-dy
+
+    Enumerator.new do |cells|
+      loop do
+        cells << $map[x0][y0] if $map[x0][y0]
+        break if x0 == x1 && y0 == y1
+        e2 = 2*err
+        if e2 > -dy
+          err = err - dy
+          x0 += sx
+        end
+        if x0 == x1 && y0 == y1
+          cells << $map[x0][y0] if $map[x0][y0]
+          break
+        end
+        if e2 < dx
+          err = err + dx
+          y0 += sy
+        end
+      end
+    end
+  end
+
+  def wave_between(cell1, cell2)
+    Enumerator.new do |cells|
+      i = 0
+      line_between(cell1, cell2).each do |cell|
+        if (cell2.x-cell1.x).abs > (cell2.y-cell1.y).abs
+          (cell.y-i ... cell.y+i).each do |y|
+            cells << $map[cell.x][y] if $map[cell.x][y]
+          end
+        else
+          (cell.x-i ... cell.x+i).each do |x|
+            cells << $map[x][cell.y] if $map[x][cell.y]
+          end
+        end
+
+        i += 1
+      end
+    end
+  end
+
   def [](x)
-    @cellmap[x]
+    @cellmap[x] || []
   end
 
   def cells(&b)
@@ -978,7 +1068,7 @@ class Game
     $player = Player.new
     $player.name = 'Mispy'
     pyromouse = Creature.new(:pyromouse)
-    pyromouse.abilities.push(Ability[:firestream])
+    pyromouse.abilities = [Ability[:firestream], Ability[:firewave]]
     pyromouse.tamer = $player
     $player.pets.push(pyromouse)
     pyromouse.order_follow($player)
@@ -989,8 +1079,11 @@ class Game
     $log = MessageLog.new
     $log.messages.push("Hullo there!")
 
-    enemy = Creature.new(:gridbug)
-    $map.some_passable_cell.put(enemy)
+    $map.some_passable_cell.put(Creature.new(:gridbug))
+    $map.some_passable_cell.put(Creature.new(:gridbug))
+    $map.some_passable_cell.put(Creature.new(:gridbug))
+    $map.some_passable_cell.put(Creature.new(:gridbug))
+    $map.some_passable_cell.put(Creature.new(:gridbug))
 
     @effects = []
   end
@@ -1161,9 +1254,12 @@ class MainGameUI
 
     case @ability.target_style
     when Ability::TARGET_LINE
-      path = @pet.path_to(cell)
-      if path
-        path.each { |x, y| con.set_char_background(x, y, TCOD::Color::RED) }
+      $map.line_between(@pet, cell).each do |c|
+        con.set_char_background(c.x, c.y, TCOD::Color::RED)
+      end
+    when Ability::TARGET_WAVE
+      $map.wave_between(@pet, cell).each do |c|
+        con.set_char_background(c.x, c.y, TCOD::Color::RED)
       end
     end
   end
