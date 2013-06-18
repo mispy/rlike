@@ -272,11 +272,13 @@ class Ability < Template
   TARGET_SELF = :self
   TARGET_LINE = :line
   TARGET_WAVE = :wave
+  TARGET_PROJECTILE = :projectile
 
   layout(
     name: String, # Humanized ability name
     key: String, # Key to invoke
     target_style: Symbol, # How this ability is targeted
+    color: TCOD::Color, # Color in interface
     result: Proc
   )
 
@@ -290,31 +292,32 @@ Ability.new(:firestream,
   name: "Fire Stream", 
   key: 'f',
   target_style: Ability::TARGET_LINE,
+  color: TCOD::Color::ORANGE,
   result: proc { |user, target|
-    line = $map.line_between(user,target)
+    line = $map.line_between(user,target).to_a[1..-1]
 
     i = 0
-    visual = Visual.new do |con| 
+    effect = Effect.new do |con| 
       j = i
-      line.each do |x, y|
+      line.each do |cell|
         color = (j % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
-        con.set_char_background(x, y, color)
+        con.set_char_background(cell.x, cell.y, color)
         j += 1
       end
       i += 1
 
-      end_visual if i >= 4
+      end_effect if i >= 4
     end
 
-    $game.effects.push(visual)
+    $game.effects.push(effect)
 
-    line.each do |x, y|
-      $map[x][y].creatures.each do |cre|
+    line.each do |cell|
+      cell.creatures.each do |cre|
         color = $player.likes?(cre) ? 'red' : 'green'
         $log.write("{fg:#{color}}#{cre.name} takes 5 damage from #{user.name}'s Fire Stream{stop}")
         cre.take_damage(5, user)
       end
-      $map[x][y].burn
+      cell.burn
     end
   }
 )
@@ -323,11 +326,12 @@ Ability.new(:firewave,
   name: "Fire Wave",
   key: 'w',
   target_style: Ability::TARGET_WAVE,
+  color: TCOD::Color::ORANGE,
   result: proc { |user, target|
     wave = $map.wave_between(user,target)
 
     i = 0
-    visual = Visual.new do |con| 
+    effect = Effect.new do |con| 
       j = i
       wave.each do |cell|
         color = (j % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
@@ -336,10 +340,10 @@ Ability.new(:firewave,
       end
       i += 1
 
-      end_visual if i >= 4
+      end_effect if i >= 4
     end
 
-    $game.effects.push(visual)
+    $game.effects.push(effect)
 
     wave.each do |cell|
       cell.creatures.each do |cre|
@@ -352,7 +356,60 @@ Ability.new(:firewave,
   }
 )
 
-class Visual
+Ability.new(:fireball,
+  name: "Fireball",
+  key: 'b',
+  target_style: Ability::TARGET_PROJECTILE,
+  color: TCOD::Color::ORANGE,
+  result: proc { |user, target|
+    line = $map.line_between(user, target).to_a[1..-1]
+
+    frame = 0
+    effect = Effect.new do |con| 
+      if frame == line.length
+        $map.circle_around(line[-1], 5).each do |cell|
+          cell.creatures.each do |cre|
+            color = $player.likes?(cre) ? 'red' : 'green'
+            $log.write("{fg:#{color}}#{cre.name} takes 5 damage from #{user.name}'s Fireball{stop}")
+            cre.take_damage(5, user)
+          end
+        end
+      end
+
+      if frame >= line.length-1
+        cell = line[-1]
+        j = frame
+        $map.circle_around(cell, 5).each do |c|
+          color = (j % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
+          j += 1
+          con.put_char(c.x, c.y, '*')
+          con.set_char_background(c.x, c.y, color)
+        end
+      else
+        cell = line[frame]
+        color = (frame % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
+        con.put_char(cell.x, cell.y, '*')
+        con.set_char_background(cell.x, cell.y, color)
+      end
+
+      frame += 1
+    end
+    $game.effects.push(effect)
+
+=begin
+    wave.each do |cell|
+      cell.creatures.each do |cre|
+        color = $player.likes?(cre) ? 'red' : 'green'
+        $log.write("{fg:#{color}}#{cre.name} takes 5 damage from #{user.name}'s Fire Wave{stop}")
+        cre.take_damage(5, user)
+      end
+      cell.burn
+    end
+=end
+  }
+)
+
+class Effect
   def initialize(&block)
     @block = block
   end
@@ -361,7 +418,7 @@ class Visual
     self.instance_exec(con, &@block)
   end
 
-  def end_visual
+  def end_effect
     $game.effects.delete(self)
   end
 end
@@ -551,7 +608,7 @@ class Mapgen
       new_divs = []
       split = false
       divs.each do |div|
-        if div.size <= 300
+        if div.size <= 400
           new_divs.push(div)
         else
           split = true
@@ -668,9 +725,10 @@ class Map
     end
   end
 
-  # Bresenham's line algorithm
-  # http://en.wikipedia.org/wiki/Bresenham's_line_algorithm
+  # Returns a list of cells in a line between cell1 and cell2
   def line_between(cell1, cell2)
+    # Bresenham's line algorithm
+    # http://en.wikipedia.org/wiki/Bresenham's_line_algorithm
     x0, y0, x1, y1 = cell1.x, cell1.y, cell2.x, cell2.y
     dx = (x1-x0).abs
     dy = (y1-y0).abs
@@ -699,21 +757,46 @@ class Map
     end
   end
 
+  # Returns an array of cells constituting a spreading wave
+  # between cell1 and cell2
   def wave_between(cell1, cell2)
     Enumerator.new do |cells|
       i = 0
       line_between(cell1, cell2).each do |cell|
         if (cell2.x-cell1.x).abs > (cell2.y-cell1.y).abs
-          (cell.y-i ... cell.y+i).each do |y|
-            cells << $map[cell.x][y] if $map[cell.x][y]
+          sides = [(cell.y ... cell.y+i), (cell.y-i ... cell.y).to_a.reverse]
+          sides.each do |side|
+            side.each do |y|
+              target = $map[cell.x][y]
+              cells << target if target
+              break unless target && target.terrain.passable
+            end
           end
         else
-          (cell.x-i ... cell.x+i).each do |x|
-            cells << $map[x][cell.y] if $map[x][cell.y]
+          sides = [(cell.x ... cell.x+i), (cell.x-i ... cell.x).to_a.reverse]
+          sides.each do |side|
+            side.each do |x|
+              target = $map[x][cell.y]
+              cells << target if target
+              break unless target && target.terrain.passable
+            end
           end
         end
 
+        break unless cell.terrain.passable
         i += 1
+      end
+    end
+  end
+
+  def circle_around(cell, radius)
+    Enumerator.new do |cells|
+      (cell.x-radius ... cell.x+radius).each do |x|
+        (cell.y-radius ... cell.y+radius).each do |y|
+          if $map[x][y].distance_to(cell) <= radius
+            cells << $map[x][y] if $map[x][y]
+          end
+        end
       end
     end
   end
@@ -827,12 +910,12 @@ module Mind
       end
 
     when STATE_ATTACKING
-      if @cell.distance_to(@attacking) < 5
-        $log.write "#{name} damages #{@attacking.name} #{@attacking.hp}/#{@attacking.max_hp}"
-        @attacking.take_damage(1, self)
-      else
+      #if @cell.distance_to(@attacking) < 5
+      #  $log.write "#{name} damages #{@attacking.name} #{@attacking.hp}/#{@attacking.max_hp}"
+      #  @attacking.take_damage(1, self)
+      #else
         @path = path_to(@attacking) unless walk_path
-      end
+      #end
     end
   end
 
@@ -1068,7 +1151,7 @@ class Game
     $player = Player.new
     $player.name = 'Mispy'
     pyromouse = Creature.new(:pyromouse)
-    pyromouse.abilities = [Ability[:firestream], Ability[:firewave]]
+    pyromouse.abilities = [Ability[:firestream], Ability[:firewave], Ability[:fireball]]
     pyromouse.tamer = $player
     $player.pets.push(pyromouse)
     pyromouse.order_follow($player)
@@ -1193,7 +1276,7 @@ class MainGameUI
       end
     end
 
-    # Miscellaneous visual effects
+    # Miscellaneous effect effects
     $game.effects.each do |effect|
       effect.render(con)
     end
@@ -1255,11 +1338,24 @@ class MainGameUI
     case @ability.target_style
     when Ability::TARGET_LINE
       $map.line_between(@pet, cell).each do |c|
-        con.set_char_background(c.x, c.y, TCOD::Color::RED)
+        con.set_char_background(c.x, c.y, @ability.color)
+        break unless c.terrain.passable
       end
     when Ability::TARGET_WAVE
       $map.wave_between(@pet, cell).each do |c|
-        con.set_char_background(c.x, c.y, TCOD::Color::RED)
+        con.set_char_background(c.x, c.y, @ability.color)
+      end
+    when Ability::TARGET_PROJECTILE
+      target = cell
+      $map.line_between(@pet, cell).to_a[1..-1].each do |c|
+        con.set_char_background(c.x, c.y, @ability.color)
+        unless c.passable?
+          target = c
+          break
+        end
+      end
+      $map.circle_around(target, 5).each do |c|
+        con.set_char_background(c.x, c.y, @ability.color)
       end
     end
   end
