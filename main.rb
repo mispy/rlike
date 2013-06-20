@@ -260,6 +260,14 @@ Species.new(:pyromouse,
   base_hp: 10
 )
 
+Species.new(:cryobeetle, 
+  name: 'Cryobeetle',
+  char: 'b', 
+  color: TCOD::Color::LIGHTEST_BLUE, 
+  fov_range: 8,
+  base_hp: 10
+)
+
 Species.new(:gridbug, 
   name: 'Gridbug',
   char: 'x', 
@@ -297,7 +305,7 @@ Ability.new(:firestream,
     line = $map.line_between(user,target).to_a[1..-1]
 
     i = 0
-    effect = Effect.new do |con| 
+    anim = Anim.new do |con| 
       j = i
       line.each do |cell|
         color = (j % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
@@ -306,10 +314,10 @@ Ability.new(:firestream,
       end
       i += 1
 
-      end_effect if i >= 4
+      end_anim if i >= 4
     end
 
-    $game.effects.push(effect)
+    $game.anims.push(anim)
 
     line.each do |cell|
       cell.creatures.each do |cre|
@@ -322,6 +330,41 @@ Ability.new(:firestream,
   }
 )
 
+Ability.new(:frostray,
+  name: "Frost Ray",
+  key: 'f',
+  target_style: Ability::TARGET_LINE,
+  color: TCOD::Color::LIGHTEST_BLUE,
+  result: proc { |user, target|
+    line = $map.line_between(user,target).to_a[1..-1]
+
+    i = 0
+    anim = Anim.new do |con| 
+      j = i
+      line.each do |cell|
+        color = (j % 2 == 0 ? TCOD::Color::LIGHTEST_BLUE : TCOD::Color::WHITE)
+        con.set_char_background(cell.x, cell.y, color)
+        j += 1
+      end
+      i += 1
+
+      end_anim if i >= 4
+    end
+
+    $game.anims.push(anim)
+
+    line.each do |cell|
+      cell.creatures.each do |cre|
+        color = $player.likes?(cre) ? 'red' : 'green'
+        $log.write("{fg:#{color}}#{cre.name} takes 5 damage from #{user.name}'s Frost Ray{stop}")
+        cre.take_damage(5, user)
+      end
+      cell.burn
+    end
+  }
+)
+
+
 Ability.new(:firewave,
   name: "Fire Wave",
   key: 'w',
@@ -331,7 +374,7 @@ Ability.new(:firewave,
     wave = $map.wave_between(user,target)
 
     i = 0
-    effect = Effect.new do |con| 
+    anim = Anim.new do |con| 
       j = i
       wave.each do |cell|
         color = (j % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
@@ -340,10 +383,10 @@ Ability.new(:firewave,
       end
       i += 1
 
-      end_effect if i >= 4
+      end_anim if i >= 4
     end
 
-    $game.effects.push(effect)
+    $game.anims.push(anim)
 
     wave.each do |cell|
       cell.creatures.each do |cre|
@@ -365,7 +408,7 @@ Ability.new(:fireball,
     line = $map.line_between(user, target).to_a[1..-1]
 
     frame = 0
-    effect = Effect.new do |con| 
+    anim = Anim.new do |con| 
       if frame == line.length
         $map.circle_around(line[-1], 5).each do |cell|
           cell.creatures.each do |cre|
@@ -394,7 +437,7 @@ Ability.new(:fireball,
 
       frame += 1
     end
-    $game.effects.push(effect)
+    $game.anims.push(anim)
 
 =begin
     wave.each do |cell|
@@ -409,7 +452,7 @@ Ability.new(:fireball,
   }
 )
 
-class Effect
+class Anim
   def initialize(&block)
     @block = block
   end
@@ -418,8 +461,8 @@ class Effect
     self.instance_exec(con, &@block)
   end
 
-  def end_effect
-    $game.effects.delete(self)
+  def end_anim
+    $game.anims.delete(self)
   end
 end
 
@@ -742,7 +785,7 @@ class Map
         break if x0 == x1 && y0 == y1
         e2 = 2*err
         if e2 > -dy
-          err = err - dy
+          rr = err - dy
           x0 += sx
         end
         if x0 == x1 && y0 == y1
@@ -1114,7 +1157,12 @@ class Player < Creature
   end
 
   def summon_pets
-    @cell.adjacent.find_all { |x| x.passable? }.sample.put(@pets[0])
+    i = 0
+    cells = @cell.adjacent.find_all { |x| x.passable? }
+    cells = cells.sample(cells.length)
+    @pets.each_with_index do |pet, i|
+      cells[i].put(pet)
+    end
   end
 
   def and_pets
@@ -1145,16 +1193,22 @@ end
 
 
 class Game
-  attr_accessor :log, :effects
+  attr_accessor :log, :anims
 
   def initialize
     $player = Player.new
     $player.name = 'Mispy'
     pyromouse = Creature.new(:pyromouse)
     pyromouse.abilities = [Ability[:firestream], Ability[:firewave], Ability[:fireball]]
-    pyromouse.tamer = $player
-    $player.pets.push(pyromouse)
-    pyromouse.order_follow($player)
+    cryobeetle = Creature.new(:cryobeetle)
+    cryobeetle.abilities = [Ability[:frostray]]
+
+    [pyromouse, cryobeetle].each do |pet|
+      pet.tamer = $player
+      $player.pets.push(pet)
+      pet.order_follow($player)
+    end
+
     change_map($mapgen.bsp(SCREEN_WIDTH, SCREEN_HEIGHT))
     $map.upstair.put($player)
     $player.summon_pets
@@ -1168,7 +1222,7 @@ class Game
     $map.some_passable_cell.put(Creature.new(:gridbug))
     $map.some_passable_cell.put(Creature.new(:gridbug))
 
-    @effects = []
+    @anims = []
   end
   
   def change_map(new_map)
@@ -1236,7 +1290,7 @@ class MainGameUI
 
   def select_pet(pet)
     @state = STATE_CHOOSE_ORDER
-    @pet = $player.pets[0]
+    @pet = pet
   end
 
   # Render the visible structure and contents of the map
@@ -1276,9 +1330,9 @@ class MainGameUI
       end
     end
 
-    # Miscellaneous effect effects
-    $game.effects.each do |effect|
-      effect.render(con)
+    # Miscellaneous animations
+    $game.anims.each do |anim|
+      anim.render(con)
     end
   end
 
@@ -1462,13 +1516,9 @@ class MainGameUI
     end
 
     case key.c
-    when '1' then
-      if @pet
-        @state = STATE_MAIN
-        @pet = nil
-      else
-        select_pet($player.pets[0])
-      end
+    when ('1'..'9') then
+      p key.c
+      select_pet($player.pets[key.c.to_i-1]) unless key.c.to_i > $player.pets.length
     when 'L' then
       @state = STATE_LOG
     when '`' then binding.pry
