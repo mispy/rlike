@@ -294,6 +294,36 @@ class Ability < Template
     @source = source
     @result.call(source, cell)
   end
+
+  def target(source, cell)
+    cells = []
+
+    case @target_style
+    when TARGET_LINE
+      $map.line_between(source, cell).each do |c|
+        cells << c
+        break unless c.terrain.passable
+      end
+    when TARGET_WAVE
+      $map.wave_between(source, cell).each do |c|
+        cells << c
+      end
+    when TARGET_PROJECTILE
+      target = cell
+      $map.line_between(source, cell).to_a[1..-1].each do |c|
+        cells << c
+        unless c.passable?
+          target = c
+          break
+        end
+      end
+      $map.circle_around(target, 5).each do |c|
+        cells << c
+      end
+    end
+
+    cells
+  end
 end
 
 Ability.new(:firestream, 
@@ -785,7 +815,7 @@ class Map
         break if x0 == x1 && y0 == y1
         e2 = 2*err
         if e2 > -dy
-          rr = err - dy
+          err = err - dy
           x0 += sx
         end
         if x0 == x1 && y0 == y1
@@ -1389,29 +1419,10 @@ class MainGameUI
   def render_targeter(con)
     cell = $map[$mouse.cx][$mouse.cy]
 
-    case @ability.target_style
-    when Ability::TARGET_LINE
-      $map.line_between(@pet, cell).each do |c|
-        con.set_char_background(c.x, c.y, @ability.color)
-        break unless c.terrain.passable
-      end
-    when Ability::TARGET_WAVE
-      $map.wave_between(@pet, cell).each do |c|
-        con.set_char_background(c.x, c.y, @ability.color)
-      end
-    when Ability::TARGET_PROJECTILE
-      target = cell
-      $map.line_between(@pet, cell).to_a[1..-1].each do |c|
-        con.set_char_background(c.x, c.y, @ability.color)
-        unless c.passable?
-          target = c
-          break
-        end
-      end
-      $map.circle_around(target, 5).each do |c|
-        con.set_char_background(c.x, c.y, @ability.color)
-      end
+    @ability.target(@pet, cell).each do |c|
+      con.set_char_background(c.x, c.y, @ability.color)
     end
+
   end
 
   def render_main
