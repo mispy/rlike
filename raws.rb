@@ -48,10 +48,18 @@ def ability(label, &block)
   Ability[label] = ConfigBuilder.build(Ability, &block)
 end
 
-terrain :floor do
-  name "Floor"
+terrain :charcoal do
+  name "Charcoal"
   char '.'
-  color Color::WHITE
+  color Color::GREY
+  bg_color Color::BLACK
+  passable true
+end
+
+terrain :ice do
+  name "ice"
+  char '.'
+  color Color::LIGHTEST_CYAN
   bg_color Color::BLACK
   passable true
 end
@@ -84,7 +92,7 @@ species :player do
   name "Player"
   char '@'
   color Color::WHITE
-  fov_range 20
+  fov_range 30
   base_hp 10
 end
 
@@ -108,7 +116,7 @@ species :gridbug do
   name "Gridbug"
   char 'x'
   color Color::PURPLE
-  fov_range 8
+  fov_range 30
   base_hp 5
 end
 
@@ -128,13 +136,20 @@ ability :fireball do
   projectile do
     char '*'
     impact_radius 5
-    impact_effect type: :damage, amount: 5
+    impact_effects(
+      OpenStruct.new(type: :damage, amount: 5),
+      OpenStruct.new(type: :burn)
+    )
   end
 end
 
-ability :snowstorm do
-  name "Snowstorm"
+ability :frostray do
+  name "Frost Ray"
   key 's'
   targets :vortex
   colors Color::LIGHTEST_BLUE, Color::WHITE
+  effects(
+    OpenStruct.new(type: :damage, amount: 5 ),
+    OpenStruct.new(type: :freeze )
+  )
 end

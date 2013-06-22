@@ -119,9 +119,11 @@ class Cell
   def right; $map[@x+1][@y]; end
 
   def burn
-    if @terrain.is(Terrain::FLAG_FLAMMABLE)
-      @terrain = Terrain[:floor]
-    end
+    @terrain = Terrain[:charcoal] if @terrain.passable
+  end
+
+  def freeze
+    @terrain = Terrain[:ice] if @terrain.passable
   end
 end
 
@@ -182,7 +184,7 @@ class Projectile
     color = @colors[@position % @colors.length]
     con.set_char_background(cell.x, cell.y, color)
 
-    if cell == @path[-1] || !cell.passable?
+    if cell == @path[-1] || !cell.terrain.passable
       impact(cell)
     else
       @position += 1
@@ -202,7 +204,26 @@ class Animation
     @frame += 1
 
     if @duration && @frame >= @duration
-      #$game.anims.delete(self)
+      $game.anims.delete(self)
+    end
+  end
+end
+
+class Effect
+  def self.apply(effect, cells, user, ability)
+    if effect.type == :damage
+      cells.each do |cell|
+        cell.creatures.each do |cre|
+          next unless $player.dislikes?(cre)
+          color = $player.likes?(cre) ? 'red' : 'green'
+          $log.write("{fg:#{color}}#{cre.name} takes #{effect.amount} damage from #{user.name}'s #{ability.name}{stop}")
+          cre.take_damage(effect.amount, self)
+        end
+      end
+    elsif effect.type == :burn
+      cells.each(&:burn)
+    elsif effect.type == :freeze
+      cells.each(&:freeze)
     end
   end
 end
@@ -234,9 +255,15 @@ class Ability < Template
             con.set_char_background(c.x, c.y, color)
           end
         end
+
+        @projectile.impact_effects.each do |effect|
+          Effect.apply(effect, cells, user, self)
+        end
+
         $game.anims.push(anim)
       end
       $game.projectiles.push(projectile)
+
     else
       cells = target(user, tcell)
       anim = Animation.new(duration: 5) do |con, frame|
@@ -248,6 +275,10 @@ class Ability < Template
         end
       end
       $game.anims.push(anim)
+
+      @effects.each do |effect|
+        Effect.apply(effect, cells, user, self)
+      end
     end
   end
 
@@ -268,7 +299,7 @@ class Ability < Template
       target = cell
       $map.line_between(source, cell).to_a[1..-1].each do |c|
         cells << c
-        unless c.passable?
+        unless c.terrain.passable
           target = c
           break
         end
@@ -287,17 +318,6 @@ end
 class DamageEffect
   def initialize(opts)
     @amount = opts[:amount]
-  end
-
-  def apply(source, cells, ability)
-    cells.each do |cell|
-      cell.creatures.each do |cre|
-        color = $player.likes?(cre) ? 'red' : 'green'
-        $log.write("{fg:#{color}}#{cre.name} takes #{@amount} damage from #{source.name}'s #{ability.name}{stop}")
-        cre.take_damage(@amount, source)
-      end
-      cell.burn
-    end
   end
 end
 
@@ -500,7 +520,7 @@ class Mapgen
       new_divs = []
       split = false
       divs.each do |div|
-        if div.size <= 5000
+        if div.size <= 10000
           new_divs.push(div)
         else
           split = true
@@ -792,8 +812,9 @@ class Map
 
       c2 = $map[c.x+pvv1[0]][c.y+pvv1[1]]
       c3 = $map[c.x+pvv2[0]][c.y+pvv2[1]]
-      cells += $map.circle_around(c2, 1).to_a if c2
-      cells += $map.circle_around(c3, 1).to_a if c3
+      cells += $map.circle_around(c2, 1).to_a if c2 && c2.terrain.passable
+      cells += $map.circle_around(c3, 1).to_a if c3 && c3.terrain.passable
+      break unless c.terrain.passable
     end
     cells
   end
@@ -886,7 +907,7 @@ module Mind
       random_walk
 
     when STATE_FOLLOWING
-      if (target = nearby_enemy)
+      if false#(target = nearby_enemy)
         order_attack(target)
         return take_turn
       end
@@ -1159,7 +1180,7 @@ class Game
     pyromouse = Creature.new(:pyromouse)
     pyromouse.abilities = [Ability[:firewave], Ability[:fireball]]
     cryobeetle = Creature.new(:cryobeetle)
-    cryobeetle.abilities = [Ability[:snowstorm]]
+    cryobeetle.abilities = [Ability[:frostray]]
 
     [pyromouse, cryobeetle].each do |pet|
       pet.tamer = $player
@@ -1174,6 +1195,8 @@ class Game
     $log = MessageLog.new
     $log.messages.push("Hullo there!")
 
+    $map.some_passable_cell.put(Creature.new(:gridbug))
+    $map.some_passable_cell.put(Creature.new(:gridbug))
     $map.some_passable_cell.put(Creature.new(:gridbug))
     $map.some_passable_cell.put(Creature.new(:gridbug))
     $map.some_passable_cell.put(Creature.new(:gridbug))
@@ -1549,6 +1572,7 @@ class MainGameUI
       @ability.invoke(@pet, cell)
       @pet = nil
       @state = STATE_MAIN
+      $game.end_turn
     end
   end
 end
