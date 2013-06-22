@@ -132,9 +132,9 @@ ability :fireball do
   end
 end
 
-ability :whirlwind do
-  name "Whirlwind"
-  key 'l'
-  targets :spiral
+ability :snowstorm do
+  name "Snowstorm"
+  key 's'
+  targets :vortex
   colors Color::LIGHTEST_BLUE, Color::WHITE
 end

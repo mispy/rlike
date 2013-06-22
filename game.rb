@@ -4,6 +4,7 @@ require 'libtcod'
 require 'json'
 require 'pry'
 require 'active_support/core_ext'
+require 'matrix'
 
 $debug = true
 $debug_fov = false
@@ -201,7 +202,7 @@ class Animation
     @frame += 1
 
     if @duration && @frame >= @duration
-      $game.anims.delete(self)
+      #$game.anims.delete(self)
     end
   end
 end
@@ -211,7 +212,7 @@ class Ability < Template
   TARGET_LINE = :line
   TARGET_WAVE = :wave
   TARGET_PROJECTILE = :projectile
-  TARGET_SPIRAL = :spiral
+  TARGET_VORTEX = :vortex
 
   one :name, :key, :targets, :colors, :projectile
 
@@ -275,8 +276,8 @@ class Ability < Template
       $map.circle_around(target, 5).each do |c|
         cells << c
       end
-    when TARGET_SPIRAL
-      cells = $map.spiral_around(source, source.distance_to(cell))
+    when TARGET_VORTEX
+      cells = $map.vortex_towards(source, cell)
     end
 
     cells
@@ -692,6 +693,45 @@ class Map
     end
   end
 
+  def ring_around(center, radius)
+    cells = []
+
+    add_cell = proc { |cell|
+      if cell
+        dist = cell.distance_to(center)
+        if dist.round == radius
+          cells << cell unless cells.include?(cell)
+        end
+      end
+    }
+
+    (center.x-radius ... center.x).each do |x|
+      (center.y-radius ... center.y).each do |y|
+        add_cell.call($map[x][y])
+      end
+    end
+
+    (center.x .. center.x+radius).each do |x|
+      (center.y-radius .. center.y).each do |y|
+        add_cell.call($map[x][y])
+      end
+    end
+
+    (center.x .. center.x+radius).to_a.reverse.each do |x|
+      (center.y .. center.y+radius).each do |y|
+        add_cell.call($map[x][y])
+      end
+    end
+
+    (center.x-radius .. center.x).to_a.reverse.each do |x|
+      (center.y .. center.y+radius).each do |y|
+        add_cell.call($map[x][y])
+      end
+    end
+
+    cells
+  end
+
   def spiral_around(cell, radius)
 
     cells = []
@@ -714,6 +754,47 @@ class Map
       x, y = x+dx, y+dy
     end
 
+    cells
+  end
+
+  def spiral_towards(source, cell)
+    cells = []
+    i = 0
+    $map.line_between(source, cell).each_slice(3) do |c, _|
+      ring = $map.ring_around(c, 3)
+      cells += ring#.rotate(i)[0..ring.length-5]
+      i += 3
+    end
+    cells
+  end
+
+  def vortex_towards(source, cell, radius=5)
+    return [] if source.distance_to(cell) < 1
+    v = Vector[cell.x - source.x, cell.y - source.y].normalize
+    pv1 = Vector[-v[1], v[0]]
+    pv2 = Vector[v[1], -v[0]]
+
+    cells = []
+
+    r = 0
+    dr = 1
+
+    $map.line_between(source, cell).each do |c|
+      r += dr
+      if r == radius
+        dr = -1
+      elsif r == -radius
+        dr = 1
+      end
+
+      pvv1 = pv1*r
+      pvv2 = pv2*r
+
+      c2 = $map[c.x+pvv1[0]][c.y+pvv1[1]]
+      c3 = $map[c.x+pvv2[0]][c.y+pvv2[1]]
+      cells += $map.circle_around(c2, 1).to_a if c2
+      cells += $map.circle_around(c3, 1).to_a if c3
+    end
     cells
   end
 
@@ -1078,7 +1159,7 @@ class Game
     pyromouse = Creature.new(:pyromouse)
     pyromouse.abilities = [Ability[:firewave], Ability[:fireball]]
     cryobeetle = Creature.new(:cryobeetle)
-    cryobeetle.abilities = [Ability[:whirlwind]]
+    cryobeetle.abilities = [Ability[:snowstorm]]
 
     [pyromouse, cryobeetle].each do |pet|
       pet.tamer = $player
