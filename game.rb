@@ -126,24 +126,13 @@ end
 
 class Template
   class << self
-    attr_reader :fields # Where the layout specification is stored
-    attr_reader :instances # Instances by label
-
-    def layout(fields)
-      @fields = {}
-      fields.each do |field, type|
-        @fields[field] = type
-        attr_reader field
-      end
-
-      @instances = {}
-    end
-
     def [](type)
+      @instances ||= {}
       @instances[type] or raise ArgumentError, "No such #{self.name}: #{type.inspect}"
     end
 
     def []=(type, val)
+      @instances ||= {}
       @instances[type] = val
     end
   end
@@ -151,10 +140,8 @@ class Template
   attr_reader :label # Label for an instance of a template
 
   def self.one(*fields)
-    @instances = {}
     fields.each { |field| attr_reader field }
   end
-
 end
 
 class Terrain < Template
@@ -168,31 +155,8 @@ class Terrain < Template
 end
 
 class Species < Template
-  layout(
-    name: String,
-    char: String,
-    color: TCOD::Color,
-    fov_range: Integer,
-    base_hp: Integer,
-    biomes: Array, 
-  )
+  one :name, :char, :color, :fov_range, :base_hp
 end
-
-class Colorcycle
-  def initialize(opts)
-    @colors = opts[:colors]
-  end
-
-  def render(con, frame, cells)
-    j = frame
-    cells.each do |cell|
-      color = (j % 2 == 0 ? TCOD::Color::ORANGE : TCOD::Color::RED)
-      con.set_char_background(cell.x, cell.y, color)
-      j += 1
-    end
-  end
-end
-
 
 class Projectile
   def initialize(opts)
@@ -247,15 +211,9 @@ class Ability < Template
   TARGET_LINE = :line
   TARGET_WAVE = :wave
   TARGET_PROJECTILE = :projectile
+  TARGET_SPIRAL = :spiral
 
-  layout(
-    name: String, # Humanized ability name
-    key: String, # Key to invoke
-    target_style: Symbol, # How this ability is targeted
-    color: TCOD::Color, # Color in interface
-    anim: Colorcycle,
-    result: Proc
-  )
+  one :name, :key, :targets, :colors, :projectile
 
   def color; @color||@colors[0]; end
 
@@ -317,6 +275,8 @@ class Ability < Template
       $map.circle_around(target, 5).each do |c|
         cells << c
       end
+    when TARGET_SPIRAL
+      cells = $map.spiral_around(source, source.distance_to(cell))
     end
 
     cells
@@ -732,6 +692,31 @@ class Map
     end
   end
 
+  def spiral_around(cell, radius)
+
+    cells = []
+
+    x, y = 0, 0
+    dx, dy = 0, -1
+
+    0.upto(radius**2) do
+      cx, cy = cell.x+x, cell.y+y
+      cells << $map[cx][cy] if $map[cx][cy]
+
+      if x == y || (x < 0 && x == -y) || (x > 0 && x == 1-y)
+        dx, dy = -dy, dx
+      end
+
+      if (x < 0 && x == -y)
+        x, y = x+dy, y+dx
+      end
+
+      x, y = x+dx, y+dy
+    end
+
+    cells
+  end
+
   def [](x)
     @cellmap[x] || []
   end
@@ -1037,6 +1022,10 @@ class Creature < Thing
   def to_s
     "<Creature :#{@type} (#{x},#{y})>"
   end
+
+  def distance_to(*args)
+    @cell.distance_to(*args)
+  end
 end
 
 class Player < Creature
@@ -1089,6 +1078,7 @@ class Game
     pyromouse = Creature.new(:pyromouse)
     pyromouse.abilities = [Ability[:firewave], Ability[:fireball]]
     cryobeetle = Creature.new(:cryobeetle)
+    cryobeetle.abilities = [Ability[:whirlwind]]
 
     [pyromouse, cryobeetle].each do |pet|
       pet.tamer = $player
@@ -1373,10 +1363,8 @@ class MainGameUI
   # Handle keypress in state where a pet has been previously
   # assigned to @pet
   def on_pet_keypress(key)
-    p key.c
     case key.c
     when ('a'..'z') then
-      p '???'
       @pet.abilities.each do |ability|
         if ability.key == key.c
           @ability = ability
@@ -1411,7 +1399,6 @@ class MainGameUI
 
     case key.c
     when ('1'..'9') then
-      p key.c
       select_pet($player.pets[key.c.to_i-1]) unless key.c.to_i > $player.pets.length
     when 'L' then
       @state = STATE_LOG

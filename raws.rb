@@ -131,3 +131,10 @@ ability :fireball do
     impact_effect type: :damage, amount: 5
   end
 end
+
+ability :whirlwind do
+  name "Whirlwind"
+  key 'l'
+  targets :spiral
+  colors Color::LIGHTEST_BLUE, Color::WHITE
+end
