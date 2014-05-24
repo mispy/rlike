@@ -6,13 +6,15 @@ require 'pry'
 require 'active_support/core_ext'
 require 'matrix'
 
+require 'asset'
+
 $debug = true
 $debug_fov = false
 
 #actual size of the window
 SCREEN_WIDTH = 100
 SCREEN_HEIGHT = 60
- 
+
 LIMIT_FPS = 20  #20 frames-per-second maximum
 
 MAX_MAP_CREATURES = 20
@@ -479,7 +481,7 @@ class Mapgen
     @map = solid_base(width, height)
 
     rooms = []
-    
+
     0.upto(opts[:max_rooms]) do
       w = (opts[:room_min_size] .. opts[:room_max_size]).sample
       h = (opts[:room_min_size] .. opts[:room_max_size]).sample
@@ -1120,7 +1122,7 @@ class Creature < Thing
   end
 
   ### Debug
-  
+
   def to_s
     "<Creature :#{@type} (#{x},#{y})>"
   end
@@ -1206,7 +1208,7 @@ class Game
     @anims = []
     @projectiles = []
   end
-  
+
   def change_map(new_map)
     $map = new_map
 
@@ -1222,7 +1224,7 @@ class Game
     $map.things.each do |thing|
       thing.take_turn
     end
-    
+
     if rand < 0.01 && $map.downstair.passable? && $map.creatures.length < MAX_MAP_CREATURES
       $map.downstair.put(Creature.new(:gridbug))
     end
@@ -1260,7 +1262,7 @@ class MessageLog
   def write(msg)
     @messages.push(msg)
   end
-   
+
   def render(console, x, y, width, height)
     con = TCOD::Console.new(width, height)
 
@@ -1423,7 +1425,7 @@ class MainGameUI
       # Hover inspect
       cell = $map[$mouse.cx][$mouse.cy]
       if cell.creatures.empty?
-        con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT, 
+        con.print_ex(SCREEN_WIDTH-1, SCREEN_HEIGHT-2, TCOD::BKGND_DEFAULT, TCOD::RIGHT,
                      cell.terrain.name)
       else
         cell.creatures.each do |cre|
@@ -1576,15 +1578,15 @@ class MainGameUI
     end
   end
 end
- 
+
 #############################################
 # Initialization & Main Loop
 #############################################
- 
+
 Console.set_custom_font('arial12x12.png', TCOD::FONT_TYPE_GREYSCALE | TCOD::FONT_LAYOUT_TCOD, 0, 0)
 Console.init_root(SCREEN_WIDTH, SCREEN_HEIGHT, 'ruby/TCOD tutorial', false, TCOD::RENDERER_SDL)
 TCOD.sys_set_fps(LIMIT_FPS)
- 
+
 
 class Menu
   def initialize
@@ -1620,13 +1622,15 @@ end
 
 trap('SIGINT') { exit! }
 
-#SDL::TTF.init
-#TCOD::System.register_sdl_renderer do |renderer|
-#  dst = SDL::Screen.get
-#  font = SDL::TTF.open('FreeSerif.ttf', 32, 0)
-#  surface = font.render_solid_utf8("hullo", 255, 255, 255)
-#  SDL::Surface.blit(surface, 0, 0, 0, 0, dst, 0, 0)
-#end
+=begin
+SDL::TTF.init
+TCOD::System.register_sdl_renderer do |renderer|
+  dst = SDL::Screen.get
+  font = SDL::TTF.open('FreeSerif.ttf', 32, 0)
+  surface = font.render_solid_utf8("hullo", 255, 255, 255)
+  SDL::Surface.blit(surface, 0, 0, 0, 0, dst, 0, 0)
+end
+=end
 
 $ui = MainGameUI.new
 $key = TCOD::Key.new
